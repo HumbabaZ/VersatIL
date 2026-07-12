@@ -327,6 +327,57 @@ class MixtureOfDensitiesActionTransformerConfig(DecodingNetworkConfig):
 
 
 @dataclass
+class QFATConfig(DecodingNetworkConfig):
+    """Quantization-Free Action Transformer (QFAT) configuration.
+
+    Autoregressive GPT decoder that predicts per-timestep Gaussian Mixture Model
+    parameters over continuous actions. Combines the causal backbone of
+    GPTActionTransformer with the continuous GMM output of MoDE-ACT.
+
+    Attributes:
+        _target_: Import path instantiated by Hydra.
+        embedding_dimension: Transformer hidden dimension.
+        number_of_heads: Number of query attention heads.
+        number_of_key_value_heads: K/V heads for GQA (None = same as heads = MHA).
+        feedforward_dimension: FFN hidden dimension (default: 4 * embedding_dimension).
+        number_of_layers: Number of transformer layers.
+        activation: Activation function.
+        normalization_type: Normalization type.
+        attention_type: Attention type.
+        dropout_rate: Dropout probability.
+        attention_dropout: Attention dropout probability.
+        positional_encoding_type: Positional encoding (rope, sinusoidal, None).
+        num_mixture_components: Number of GMM components K.
+        gmm_init_strategy: Strategy for initializing GMM means.
+        inference_sampling_mode: How to sample from the GMM at inference.
+        max_seq_len: Maximum sequence length for the GPT decoder.
+        min_logvar: Minimum logvar for GMM components.
+        max_logvar: Maximum logvar for GMM components.
+    """
+
+    _target_: str = (
+        "versatil.models.decoding.decoders.factory.qfat.QFATActionTransformer"
+    )
+    embedding_dimension: int = 512
+    number_of_heads: int = 8
+    number_of_key_value_heads: int | None = None
+    feedforward_dimension: int | None = None
+    number_of_layers: int = 6
+    activation: str = ActivationFunction.SWIGLU.value
+    normalization_type: str = NormalizationType.RMS_NORM.value
+    attention_type: str = AttentionType.MULTI_HEAD.value
+    dropout_rate: float = 0.1
+    attention_dropout: float = 0.0
+    positional_encoding_type: str | None = PositionalEncodingType.ROPE.value
+    num_mixture_components: int = 8
+    gmm_init_strategy: str = GMMInitStrategy.KMEANS_PLUS_PLUS.value
+    inference_sampling_mode: str = MixtureSamplingMode.STOCHASTIC_MEAN.value
+    max_seq_len: int = 512
+    min_logvar: float = -10.0
+    max_logvar: float = 4.0
+
+
+@dataclass
 class LACTConfig(DecodingNetworkConfig):
     """Latent Action Transformer (LACT) architecture configuration.
 

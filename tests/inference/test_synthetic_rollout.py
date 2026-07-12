@@ -983,3 +983,110 @@ def test_run_rollouts_integrates_constant_action_deltas_into_positions(
         np.testing.assert_allclose(
             trajectories[0, step + 1], expected_position, atol=1e-6
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "temporal_aggregation, expected_query_count",
+    [
+        (False, 3),
+        (True, 6),
+    ],
+)
+def test_run_rollouts_tolerates_short_decoded_chunk(
+    mock_policy_factory: Callable[..., MagicMock],
+    mock_layout_factory: Callable[..., MagicMock],
+    constant_action_chunk_factory: Callable[..., dict[str, torch.Tensor]],
+    temporal_aggregation: bool,
+    expected_query_count: int,
+):
+    prediction_horizon = 6
+    decoded_steps = 2
+    delta = 0.1
+    start = np.array([0.0, 0.0], dtype=np.float32)
+    layout = mock_layout_factory(has_goal=True, num_modes=3)
+    layout.start = start
+    mock_policy = mock_policy_factory(
+        prediction_horizon=prediction_horizon,
+        observation_horizon=1,
+        observations_metadata={
+            ProprioKey.SYNTHETIC_POSITION.value: MagicMock(),
+        },
+        predict_action_return=constant_action_chunk_factory(
+            prediction_horizon=decoded_steps, delta=delta
+        ),
+    )
+
+    with (
+        patch(
+            "versatil.inference.synthetic_rollout.get_task_layout",
+            return_value=layout,
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout._prepare_observation",
+            return_value={},
+        ),
+    ):
+        trajectories = run_rollouts(
+            policy=mock_policy,
+            task_name=SyntheticTaskName.CIRCLE.value,
+            num_rollouts=1,
+            image_size=16,
+            temporal_aggregation=temporal_aggregation,
+        )
+
+    assert trajectories.shape == (1, prediction_horizon + 1, 2)
+    # the rollout re-queries the policy to fill the horizon from short chunks
+    assert mock_policy.predict_action.call_count == expected_query_count
+    np.testing.assert_array_equal(trajectories[0, 0], start)
+    for step in range(prediction_horizon):
+        expected_position = np.clip(start + delta * (step + 1), 0.0, 1.0)
+        np.testing.assert_allclose(
+            trajectories[0, step + 1], expected_position, atol=1e-6
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("temporal_aggregation", [True, False])
+def test_run_rollouts_holds_position_when_decoder_returns_no_actions(
+    mock_policy_factory: Callable[..., MagicMock],
+    mock_layout_factory: Callable[..., MagicMock],
+    constant_action_chunk_factory: Callable[..., dict[str, torch.Tensor]],
+    temporal_aggregation: bool,
+):
+    prediction_horizon = 5
+    start = np.array([0.3, 0.4], dtype=np.float32)
+    layout = mock_layout_factory(has_goal=True, num_modes=3)
+    layout.start = start
+    mock_policy = mock_policy_factory(
+        prediction_horizon=prediction_horizon,
+        observation_horizon=1,
+        observations_metadata={
+            ProprioKey.SYNTHETIC_POSITION.value: MagicMock(),
+        },
+        predict_action_return=constant_action_chunk_factory(prediction_horizon=0),
+    )
+
+    with (
+        patch(
+            "versatil.inference.synthetic_rollout.get_task_layout",
+            return_value=layout,
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout._prepare_observation",
+            return_value={},
+        ),
+    ):
+        trajectories = run_rollouts(
+            policy=mock_policy,
+            task_name=SyntheticTaskName.CIRCLE.value,
+            num_rollouts=1,
+            image_size=16,
+            temporal_aggregation=temporal_aggregation,
+        )
+
+    # an empty decoded chunk freezes the trajectory instead of crashing or stalling
+    assert trajectories.shape == (1, prediction_horizon + 1, 2)
+    assert mock_policy.predict_action.call_count == prediction_horizon
+    for step in range(prediction_horizon + 1):
+        np.testing.assert_array_equal(trajectories[0, step], start)

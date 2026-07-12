@@ -1,0 +1,24 @@
+defaults:
+  - qfat_schema
+  - heads@action_heads: gaussian_libero
+
+input_keys:
+  - left_rgb
+  - right_rgb
+embedding_dimension: 512
+number_of_heads: 8
+number_of_key_value_heads: null
+feedforward_dimension: null
+number_of_layers: 6
+activation: ${activation_function:SWIGLU}
+normalization_type: ${normalization:RMS_NORM}
+attention_type: ${attention:MULTI_HEAD}
+dropout_rate: 0.1
+attention_dropout: 0.0
+positional_encoding_type: ${pos_encoding:ROPE}
+num_mixture_components: 8
+gmm_init_strategy: ${gmm_init:KMEANS_PLUS_PLUS}
+inference_sampling_mode: ${mixture_sampling:STOCHASTIC_MEAN}
+max_seq_len: 512
+min_logvar: -10.0
+max_logvar: 4.0

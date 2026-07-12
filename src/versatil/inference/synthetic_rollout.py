@@ -163,7 +163,13 @@ def run_rollouts(
                 with torch.no_grad():
                     actions = policy.predict_action(obs_dict=observation)
                 action_deltas = actions[action_key].squeeze(0).cpu().numpy()
-                remaining = min(prediction_horizon - step, prediction_horizon)
+                # A tokenized decoder may return fewer/more steps than the
+                # prediction horizon; cap by what was actually produced.
+                remaining = min(prediction_horizon - step, len(action_deltas))
+                if remaining == 0:
+                    # No usable actions decoded; hold position for this step.
+                    positions[step + 1] = positions[step].copy()
+                    continue
                 action_buffer[step, step : step + remaining] = action_deltas[:remaining]
                 populated_mask[step, step : step + remaining] = True
                 valid_queries = populated_mask[:, step]
@@ -202,8 +208,16 @@ def run_rollouts(
                 with torch.no_grad():
                     actions = policy.predict_action(obs_dict=observation)
                 action_deltas = actions[action_key].squeeze(0).cpu().numpy()
-                # Execute all remaining actions in this chunk
-                remaining = min(prediction_horizon - step, prediction_horizon)
+                # A tokenized decoder may return fewer/more steps than the
+                # prediction horizon; cap by what was actually produced.
+                remaining = min(prediction_horizon - step, len(action_deltas))
+                if remaining == 0:
+                    # No usable actions decoded; hold position and advance so
+                    # the rollout cannot stall.
+                    positions[step + 1] = positions[step].copy()
+                    step += 1
+                    continue
+                # Execute the decoded actions in this chunk
                 for chunk_offset in range(remaining):
                     positions[step + 1] = np.clip(
                         positions[step] + action_deltas[chunk_offset], 0.0, 1.0

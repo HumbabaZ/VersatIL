@@ -68,6 +68,7 @@ from versatil.configs import (
     PriorLatentEncoderConfig,
     PriorTransformerEncoderConfig,
     ProprioEncoderConfig,
+    QFATConfig,
     RegressionLossConfig,
     RelaxedConditionalLatentOptimalTransportLossConfig,
     ResidualBlockConfig,
@@ -327,6 +328,7 @@ def register(cs: ConfigStore) -> None:
         name="mode_act",
         node=MixtureOfDensitiesActionTransformerConfig,
     )
+    cs.store(group="policy/decoder", name="qfat_schema", node=QFATConfig)
     cs.store(group="policy/decoder/head_block", name="base", node=ActionHeadBlockConfig)
     cs.store(group="policy/decoder/head_block", name="mlp", node=MLPBlockConfig)
     cs.store(

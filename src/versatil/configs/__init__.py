@@ -78,6 +78,7 @@ from versatil.configs.decoding.decoder import (
     OpenVLAOFTConfig,
     PhaseACTConfig,
     Pi0DecoderConfig,
+    QFATConfig,
     SmolVLADecoderConfig,
 )
 from versatil.configs.decoding.latent import (

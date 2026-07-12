@@ -592,3 +592,23 @@ def test_training_data_plot_receives_mode_ids_and_title(
     )
     assert training_data_call.kwargs["title"] == "Training Data"
     assert training_data_call.kwargs["mode_ids"] is not None
+
+
+@pytest.mark.unit
+def test_rollout_failure_is_caught_and_training_continues(
+    callback_factory: Callable[..., SyntheticRolloutCallback],
+    mock_trainer_factory: Callable[..., MagicMock],
+    mock_pl_module_factory: Callable[..., MagicMock],
+):
+    callback = callback_factory()
+    trainer = mock_trainer_factory(current_epoch=1, logger=None)
+    pl_module = mock_pl_module_factory(policy_training=True)
+
+    with patch(
+        "versatil.training.callbacks.synthetic_rollout.run_rollouts",
+        side_effect=RuntimeError("undecodable action sequence"),
+    ):
+        callback.on_train_epoch_end(trainer=trainer, pl_module=pl_module)
+
+    pl_module.policy.eval.assert_called_once()
+    pl_module.policy.train.assert_called_once()

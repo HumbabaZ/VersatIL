@@ -80,38 +80,51 @@ class SyntheticRolloutCallback(Callback):
         was_training = policy.training
         policy.eval()
 
-        context_modes = self._resolve_context_modes(policy=policy)
-        precision_type = PrecisionType(str(trainer.precision))
-        with (
-            torch.no_grad(),
-            precision_type.autocast(device_type=pl_module.device.type),
-        ):
-            per_mode_trajectories = [
-                run_rollouts(
-                    policy=policy,
-                    task_name=self.task_name,
-                    num_rollouts=self.num_rollouts,
-                    image_size=self.image_size,
-                    context_mode=mode,
-                    temporal_aggregation=False,  # open-loop
-                )
-                for mode in context_modes
-            ]
-        trajectories = (
-            per_mode_trajectories[0]
-            if len(per_mode_trajectories) == 1
-            else np.concatenate(per_mode_trajectories, axis=0)
-        )
+        # Rollout evaluation is diagnostic only. A failure here (e.g. a
+        # tokenized decoder emitting an undecodable action sequence) must not
+        # abort training, so any error is downgraded to a warning.
+        try:
+            context_modes = self._resolve_context_modes(policy=policy)
+            precision_type = PrecisionType(str(trainer.precision))
+            with (
+                torch.no_grad(),
+                precision_type.autocast(device_type=pl_module.device.type),
+            ):
+                per_mode_trajectories = [
+                    run_rollouts(
+                        policy=policy,
+                        task_name=self.task_name,
+                        num_rollouts=self.num_rollouts,
+                        image_size=self.image_size,
+                        context_mode=mode,
+                        temporal_aggregation=False,  # open-loop
+                    )
+                    for mode in context_modes
+                ]
+            trajectories = (
+                per_mode_trajectories[0]
+                if len(per_mode_trajectories) == 1
+                else np.concatenate(per_mode_trajectories, axis=0)
+            )
 
-        results = evaluate_rollouts(
-            rollout_trajectories=trajectories,
-            task_name=self.task_name,
-            image_size=self.image_size,
-            num_modes=self.num_modes,
-            num_styles=self.num_styles,
-            trajectory_length=self.trajectory_length,
-            noise_std=self.noise_std,
-        )
+            results = evaluate_rollouts(
+                rollout_trajectories=trajectories,
+                task_name=self.task_name,
+                image_size=self.image_size,
+                num_modes=self.num_modes,
+                num_styles=self.num_styles,
+                trajectory_length=self.trajectory_length,
+                noise_std=self.noise_std,
+            )
+        except Exception:
+            logging.warning(
+                f"Synthetic rollout evaluation failed at epoch "
+                f"{trainer.current_epoch}, skipping.",
+                exc_info=True,
+            )
+            if was_training:
+                policy.train()
+            return
 
         epoch = trainer.current_epoch
         mode_coverage = results["mode_coverage"]
