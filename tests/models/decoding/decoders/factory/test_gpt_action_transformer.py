@@ -698,6 +698,46 @@ class TestGPTActionTransformerForward:
         assert (tokens == eos_token_id).all()
 
     @pytest.mark.unit
+    def test_inference_fixed_length_binned_generates_exact_payload(
+        self,
+        gpt_transformer_factory: Callable[..., GPTActionTransformer],
+        mock_tokenizer_factory: Callable[..., MagicMock],
+        flat_feature_factory: Callable[..., dict[str, torch.Tensor]],
+    ):
+        time_horizon = 3
+        action_dim = 2
+        decoder = gpt_transformer_factory(max_seq_len=MAX_SEQ_LEN, deterministic=True)
+        tokenizer = mock_tokenizer_factory(
+            vocab_size=VOCAB_SIZE,
+            fixed_length=True,
+            time_horizon=time_horizon,
+            action_dim=action_dim,
+        )
+        decoder.set_tokenizer(tokenizer=tokenizer)
+        decoder.eval()
+        eos_token_id = tokenizer.action_tokenizer.eos_token_id
+        head = decoder.action_heads[DecoderOutputKey.ACTION_LOGITS.value]
+        # Force EOS to be the argmax at every step; a deterministic fixed-length
+        # code must still emit the full payload and never sample the excluded EOS.
+        eos_logits = torch.full(
+            (BATCH_SIZE, 1, tokenizer.action_tokenizer.vocab_size),
+            fill_value=-100.0,
+        )
+        eos_logits[:, :, eos_token_id] = 100.0
+        features = flat_feature_factory(
+            batch_size=BATCH_SIZE,
+            feature_dim=EMBEDDING_DIMENSION,
+        )
+        with (
+            torch.no_grad(),
+            unittest.mock.patch.object(head, "forward", return_value=eos_logits),
+        ):
+            predictions = decoder(features=features, actions=None)
+        tokens = predictions[DecoderOutputKey.PREDICTED_ACTION_TOKENS.value]
+        assert tokens.shape == (BATCH_SIZE, time_horizon * action_dim)
+        assert (tokens != eos_token_id).all()
+
+    @pytest.mark.unit
     def test_causal_masking_future_tokens_do_not_affect_past_predictions(
         self,
         gpt_transformer_factory: Callable[..., GPTActionTransformer],

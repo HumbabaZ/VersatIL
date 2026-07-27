@@ -1,0 +1,31 @@
+# Observation-language + per-value binned action tokenization for train-from-scratch
+# GPT decoders, the binned counterpart of obs_language_action_fast.yaml. Actions are
+# uniformly binned into per-dimension IDs (OpenVLA-style 256-bin discretization over
+# the min-max normalized [-1, 1] range) and mapped through the identity token space,
+# so the model vocabulary is num_bins + 1 (the extra ID is EOS).
+#
+# Binning does NOT compress: a chunk emits prediction_horizon * tokenized_action_dim
+# tokens, so max_token_len must exceed that count. The default fits LIBERO's
+# horizon-10 x 7-DoF actions (70 tokens + EOS); override it for other shapes.
+#
+# Uniform binning requires kinematics_norm_type=min_max on the consuming dataloader.
+defaults:
+  - base
+
+tokenize_observations: true
+tokenize_actions: true
+observation_tokenizer:
+  tokenizer_model: ${language_model:BERT_BASE}
+  observation_keys:
+    - ${obs_key:LANGUAGE}
+  max_token_len: 32
+action_tokenizer:
+  action_discretizer:
+    type: ${action_discretizer:BINNED}
+    binning_strategy: ${binning_strategy:UNIFORM}
+    num_bins: 256
+    min_value: -1.0
+    max_value: 1.0
+  token_id_mapping:
+    type: ${action_token_id_mapping:IDENTITY}
+  max_token_len: 72

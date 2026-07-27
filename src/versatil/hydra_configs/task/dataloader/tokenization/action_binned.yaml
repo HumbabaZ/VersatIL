@@ -1,0 +1,29 @@
+# Actions-only per-value binned tokenization for train-from-scratch GPT decoders,
+# the binned counterpart of action_fast.yaml. Actions are uniformly binned into
+# per-dimension IDs (OpenVLA-style 256-bin discretization over the min-max
+# normalized [-1, 1] range) and mapped through the identity token space, so the
+# model vocabulary is num_bins + 1 (the extra ID is EOS).
+#
+# Unlike FAST, binning does NOT compress: a chunk emits
+# prediction_horizon * tokenized_action_dim tokens, so max_token_len must exceed
+# that count or encoding raises. The default fits the synthetic benchmark's
+# horizon-59 x 2-DoF actions (118 tokens + EOS); override it for other shapes.
+#
+# Uniform binning requires kinematics_norm_type=min_max on the consuming
+# dataloader (enforced in dataloader validation): the fixed [-1, 1] bin range
+# would otherwise clip gaussian/demeaned actions into the edge bins.
+defaults:
+  - base
+
+tokenize_observations: false
+tokenize_actions: true
+action_tokenizer:
+  action_discretizer:
+    type: ${action_discretizer:BINNED}
+    binning_strategy: ${binning_strategy:UNIFORM}
+    num_bins: 256
+    min_value: -1.0
+    max_value: 1.0
+  token_id_mapping:
+    type: ${action_token_id_mapping:IDENTITY}
+  max_token_len: 120

@@ -9,22 +9,48 @@ import torch
 
 from versatil.data.constants import SampleKey
 from versatil.data.tokenization import ActionTokenizer, Tokenizer
+from versatil.data.tokenization.action_discretizer import BinnedActionDiscretizer
 from versatil.models.decoding.constants import AlgorithmContextKey
 from versatil.models.encoding.encoders.constants import EncoderOutputKeys
 
 
 @pytest.fixture
 def mock_tokenizer_factory() -> Callable[..., MagicMock]:
-    """Factory for mock Tokenizer with configurable vocab size."""
+    """Factory for mock Tokenizer with configurable vocab size.
 
-    def factory(vocab_size: int = 32, max_token_len: int = 256) -> MagicMock:
+    The action tokenizer exposes an identity token-id mapping over ``vocab_size``
+    bins plus an EOS token. Set ``fixed_length`` to emulate a binned discretizer
+    (deterministic ``time_horizon * action_dim`` token count with EOS excluded
+    from generation); otherwise the discretizer is treated as variable-length.
+    """
+
+    def factory(
+        vocab_size: int = 32,
+        max_token_len: int = 256,
+        fixed_length: bool = False,
+        time_horizon: int | None = None,
+        action_dim: int | None = None,
+    ) -> MagicMock:
         tokenizer = MagicMock(spec=Tokenizer)
-        tokenizer.action_tokenizer = MagicMock(spec=ActionTokenizer)
+        action_tokenizer = MagicMock(spec=ActionTokenizer)
+        tokenizer.action_tokenizer = action_tokenizer
         eos_token_id = vocab_size
         effective_vocab_size = vocab_size + 1
-        tokenizer.action_tokenizer.vocab_size = effective_vocab_size
-        tokenizer.action_tokenizer.eos_token_id = eos_token_id
-        tokenizer.action_tokenizer.max_token_len = max_token_len
+        action_tokenizer.vocab_size = effective_vocab_size
+        action_tokenizer.eos_token_id = eos_token_id
+        action_tokenizer.max_token_len = max_token_len
+        if fixed_length:
+            discretizer = MagicMock(spec=BinnedActionDiscretizer)
+            discretizer.time_horizon = time_horizon
+            discretizer.action_dim = action_dim
+        else:
+            discretizer = MagicMock()
+        discretizer.token_count = vocab_size
+        action_tokenizer.action_discretizer = discretizer
+        action_tokenizer.token_id_mapping = MagicMock()
+        action_tokenizer.token_id_mapping.encode = (
+            lambda local_token_ids: np.asarray(local_token_ids, dtype=np.int64)
+        )
         return tokenizer
 
     return factory

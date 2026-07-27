@@ -11,7 +11,6 @@ import torch
 from versatil.data.constants import ActionTokenIdMappingType, SampleKey
 from versatil.data.task import ActionSpace, ObservationSpace
 from versatil.data.tokenization import ActionTokenizer, Tokenizer
-from versatil.data.tokenization.action_discretizer import BinnedActionDiscretizer
 from versatil.models.decoding.action_heads import ActionHead
 from versatil.models.decoding.constants import ActionHeadLayout, DecoderOutputKey
 from versatil.models.decoding.decoders.autoregressive_mixin import (
@@ -93,8 +92,6 @@ class AutoregressiveVLADecoder(
         )
         self.max_seq_len = max_seq_len
         self.causal_prefix = causal_prefix
-        self.eos_token_id: int | None = None
-        self.valid_generation_token_ids: torch.Tensor | None = None
 
         DiscreteDecoder.__init__(
             self,
@@ -183,83 +180,6 @@ class AutoregressiveVLADecoder(
             )
         return int(language_vocab_size)
 
-    def _build_valid_generation_token_ids(
-        self,
-        action_tokenizer: ActionTokenizer,
-        tokenizer_vocab_size: int,
-        eos_token_id: int,
-    ) -> torch.Tensor:
-        """Return action-token IDs that inference is allowed to sample.
-
-        Fixed-length generation (binned discretizers) excludes EOS: the
-        detokenizer requires exactly ``time_horizon * action_dim`` payload
-        tokens, so an early EOS sample would truncate the sequence and fail
-        decoding. The generation loop is already capped at the payload count.
-        """
-        token_count = action_tokenizer.action_discretizer.token_count
-        local_token_ids = list(range(int(token_count)))
-        action_token_ids = action_tokenizer.token_id_mapping.encode(local_token_ids)
-        valid_token_ids = torch.as_tensor(
-            action_token_ids,
-            dtype=torch.long,
-            device=self.device,
-        )
-        if not self._uses_fixed_length_action_generation(
-            action_tokenizer=action_tokenizer
-        ):
-            eos_token = torch.tensor(
-                [eos_token_id], dtype=torch.long, device=self.device
-            )
-            valid_token_ids = torch.cat([valid_token_ids, eos_token], dim=0)
-        if (
-            valid_token_ids.min().item() < 0
-            or valid_token_ids.max().item() >= tokenizer_vocab_size
-        ):
-            raise ValueError(
-                "AutoregressiveVLADecoder valid action-token IDs must lie inside "
-                f"the action tokenizer vocabulary [0, {tokenizer_vocab_size})."
-            )
-        return valid_token_ids
-
-    @staticmethod
-    def _uses_fixed_length_action_generation(
-        action_tokenizer: ActionTokenizer,
-    ) -> bool:
-        """Return whether inference should generate a known action-token count."""
-        return isinstance(action_tokenizer.action_discretizer, BinnedActionDiscretizer)
-
-    def _get_action_payload_token_count(self) -> int | None:
-        """Return the required action-token count before any optional EOS."""
-        if self.tokenizer is None:
-            return None
-        if not self._uses_fixed_length_action_generation(
-            action_tokenizer=self.tokenizer
-        ):
-            return None
-        time_horizon = self.tokenizer.action_discretizer.time_horizon
-        action_dim = self.tokenizer.action_discretizer.action_dim
-        if time_horizon is None or action_dim is None:
-            raise ValueError(
-                "AutoregressiveVLADecoder fixed-length generation requires the "
-                "action discretizer to know time_horizon and action_dim."
-            )
-        return int(time_horizon * action_dim)
-
-    def _get_max_generation_steps(self, available_context_steps: int) -> int:
-        """Return the action-token generation cap within context capacity."""
-        action_payload_token_count = self._get_action_payload_token_count()
-        if action_payload_token_count is None:
-            return super()._get_max_generation_steps(
-                available_context_steps=available_context_steps
-            )
-        if available_context_steps < action_payload_token_count:
-            raise ValueError(
-                f"{type(self).__name__} needs {action_payload_token_count} context "
-                "slots for fixed-length action-token generation, but only "
-                f"{available_context_steps} are available."
-            )
-        return action_payload_token_count
-
     def _validate_action_tokenizer_is_set(self) -> None:
         """Ensure action-token metadata was initialized."""
         if (
@@ -302,38 +222,6 @@ class AutoregressiveVLADecoder(
                 f"{batch_size}, got {target_token_ids.shape[0]}."
             )
         return target_token_ids.to(device=self.device, dtype=torch.long)
-
-    def _sample_next_action_token(
-        self,
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
-        """Sample from the valid action-token subset of the VLM vocabulary."""
-        if self.valid_generation_token_ids is None:
-            raise ValueError(
-                "AutoregressiveVLADecoder valid action-token IDs are not initialized."
-            )
-        valid_token_ids = self.valid_generation_token_ids.to(
-            device=logits.device
-        )  # (valid_action_token_count)
-        valid_logits = logits.index_select(
-            dim=-1,
-            index=valid_token_ids,
-        )  # (B, 1, valid_action_token_count)
-        if self.deterministic:
-            selected_indices = torch.argmax(valid_logits, dim=-1)  # (B, 1)
-        else:
-            scaled_logits = valid_logits / self.temperature.clamp(
-                min=0.01
-            )  # (B, 1, valid_action_token_count)
-            probabilities = torch.softmax(
-                scaled_logits,
-                dim=-1,
-            )  # (B, 1, valid_action_token_count)
-            selected_indices = torch.multinomial(
-                probabilities.squeeze(1),  # (B, valid_action_token_count)
-                num_samples=1,
-            )  # (B, 1)
-        return valid_token_ids[selected_indices]  # (B, 1)
 
     def _build_projected_prefix(
         self,

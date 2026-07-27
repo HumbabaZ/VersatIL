@@ -1,0 +1,77 @@
+# @package _global_
+# GPT-style autoregressive transformer with per-value binned (uniform 256-bin)
+# tokenized actions, trained from scratch on the synthetic multimodal benchmark.
+# Binned counterpart of synthetic/gpt_transformer (which uses FAST). Each action
+# chunk is discretized into prediction_horizon * action_dim = 59 * 2 = 118 bin IDs
+# plus an EOS token; the identity token-id mapping keeps the vocabulary compact at
+# num_bins + 1. SyntheticSchema auto-injects SyntheticRolloutCallback, which runs
+# closed-/open-loop rollouts and logs mode coverage / success metrics every
+# experiment.val_every epochs.
+_target_: versatil.configs.main.MainConfig
+
+defaults:
+  - /task: base
+  - /policy: base
+  - /experiment: synthetic
+  - /task/dataset_schema: synthetic/circle
+  - /task/dataloader: synthetic_binned_actions
+  - /task/action_space: synthetic_2d
+  - /task/observation_space: synthetic_image_state
+  - /training: synthetic
+  - /policy/encoding_pipeline: mono_rgb
+  - /policy/decoder: gpt_action_transformer
+  - /policy/algorithm: behavioral_cloning
+  - /policy/loss: token_ce
+  - _self_
+
+task:
+  observation_horizon: 1
+  prediction_horizon: 59
+  dataloader:
+    tokenization:
+      action_tokenizer:
+        action_discretizer:
+          num_bins: 64
+
+experiment:
+  checkpoint_folder: ${checkpoint_dir:synthetic}
+  save_checkpoints: true
+  checkpoint_every: 100
+  val_every: 50  # rollout evaluation cadence (epochs)
+
+training:
+  optimizer:
+    lr: 1.0e-4
+    betas: [0.9, 0.95]
+  lr_schedule: cosine
+  lr_warmup_steps: 40
+  use_ema: true
+
+policy:
+  metadata_passthrough:
+    ${metadata_passthrough_source:OBSERVATION}:
+      ${synthetic_obs_key:MODE_ID}: ${metadata_key:LATENT_COLOR_LABEL}
+  _target_: versatil.models.policy.Policy
+  observation_space: ${task.observation_space}
+  action_space: ${task.action_space}
+  prediction_horizon: ${task.prediction_horizon}
+  observation_horizon: ${task.observation_horizon}
+  device: ${experiment.device}
+  encoding_pipeline:
+    encoders:
+      left:
+        input_keys:
+          - ${cameras:AGENTVIEW}
+        backbone: ${rgb_backbone:MOBILENETV4_SMALL_050}
+  decoder:
+    input_keys:
+      - left_rgb
+    embedding_dimension: 256
+    number_of_heads: 4
+    number_of_key_value_heads: null  # MHA: must match number_of_heads or be null
+    feedforward_dimension: 512
+    dropout_rate: 0.2
+    attention_dropout: 0.15
+    deterministic: false
+    learnable_temperature: false
+    temperature: 1.0

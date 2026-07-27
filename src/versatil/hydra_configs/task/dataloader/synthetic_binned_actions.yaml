@@ -1,0 +1,27 @@
+# Synthetic-benchmark dataloader with per-value binned action tokenization, for the
+# GPT autoregressive decoder. Mirrors synthetic_tokenized_actions but swaps FAST for
+# uniform 256-bin discretization. Observations stay untokenized (the synthetic tasks
+# have no language). kinematics_norm_type stays min_max, which uniform binning
+# requires so the [-1, 1] bin range matches the normalized action range.
+defaults:
+  - base
+  - tokenization@tokenization: action_binned
+
+batch_size: 256
+num_workers: 8
+preload_data_in_memory: true
+shuffle: true
+
+image_norm_type: ${image_norm_type:MINUS_ONE_TO_ONE}
+depth_norm_type: ${image_norm_type:MINUS_ONE_TO_ONE}
+kinematics_norm_type: ${kinematics_norm_type:MIN_MAX}
+winsorize_depth: false
+winsorize_kinematics: false
+
+skip_initial_episode_steps: 0
+downsample_factor: 1
+action_backward_shift: 0
+trailing_padded_actions: 0
+
+val_ratio: 0.05
+total_ratio: 1.0
