@@ -272,7 +272,10 @@ class QFATActionTransformer(ActionDecoder):
                 continue
             field_normalizer = normalizer[key]
             output_stats = field_normalizer.get_output_stats()
-            candidate_sample = field_normalizer.get_output_sample()
+            chunks = field_normalizer.get_output_sample_chunks()
+            candidate_sample = (
+                None if chunks is None else chunks.reshape(-1, chunks.shape[-1])
+            )
             self._initialize_gmm_projection(
                 key=key,
                 output_stats=output_stats,

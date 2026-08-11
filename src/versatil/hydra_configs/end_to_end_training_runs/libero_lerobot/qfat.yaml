@@ -21,7 +21,7 @@ defaults:
 
 task:
   observation_horizon: 1
-  prediction_horizon: 10
+  prediction_horizon: 1 # for libero pro the prediction horizon of qfat can only be 1
   dataloader:
     tokenization:
       observation_tokenizer:
@@ -68,7 +68,7 @@ policy:
     number_of_key_value_heads: 8
     number_of_layers: 4
     feedforward_dimension: 1024
-    dropout_rate: 0.15
-    attention_dropout: 0.05
-    num_mixture_components: 8
+    dropout_rate: 0.25
+    attention_dropout: 0.1
+    num_mixture_components: 4
     min_logvar: -4.0

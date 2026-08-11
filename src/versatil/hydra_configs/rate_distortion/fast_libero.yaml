@@ -1,0 +1,27 @@
+# @package _global_
+# FAST tokenizer rate-distortion analysis on LIBERO (LeRobot). No model training:
+# fits FAST at each (rounding scale, BPE vocab size) cell on the training-split
+# action chunks and measures rate (bits per chunk) and reconstruction distortion.
+defaults:
+  - /task/dataset_schema: libero_lerobot
+  - /task/dataloader: libero_lerobot
+  - /task/action_space: libero_precomputed_lerobot
+  - /task/observation_space: libero_rgb_lerobot
+  - /experiment: default
+  - _self_
+
+task:
+  observation_horizon: 1
+  prediction_horizon: 10
+
+rate_distortion:
+  _target_: versatil.analysis.rate_distortion.config.FastRateDistortionConfig
+  scales: [2, 5, 10, 20, 50]
+  vocab_sizes: [256, 512, 1024, 2048]
+  scale_sweep_fixed_vocab: 1024
+  vocab_sweep_fixed_scale: 10
+  near_lossless_scale: 100
+  near_lossless_vocab: 4096
+  near_lossless_tolerance: 0.05
+  max_chunks: 20000
+  pretrained_fast_model: physical-intelligence/fast
