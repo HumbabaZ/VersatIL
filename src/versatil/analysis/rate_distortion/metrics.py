@@ -52,6 +52,29 @@ def rate_metrics(token_lists: list[list[int]], vocab_size: int) -> dict[str, flo
     return {"mean_token_len": mean_token_len, "bits_per_chunk": bits_per_chunk}
 
 
+def binning_rate(num_bins: int, time_horizon: int, action_dim: int) -> dict[str, float]:
+    """Analytic rate of per-value binning (fixed token length T·D).
+
+    Args:
+        num_bins: Bins per action value.
+        time_horizon: Chunk length.
+        action_dim: Action dimension.
+
+    Returns:
+        ``mean_token_len`` (= T·D) and ``bits_per_chunk`` (= T·D·log2(num_bins)).
+    """
+    token_length = float(time_horizon * action_dim)
+    return {
+        "mean_token_len": token_length,
+        "bits_per_chunk": token_length * float(np.log2(num_bins)),
+    }
+
+
+def bits_per_step(bits_per_chunk: float, time_horizon: int) -> float:
+    """Convert per-chunk bits to the cross-family per-timestep rate axis."""
+    return bits_per_chunk / time_horizon
+
+
 def reconstruction_distortion(
     ground_truth_normalized: np.ndarray,
     reconstruction_normalized: np.ndarray,

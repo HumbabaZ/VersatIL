@@ -31,6 +31,11 @@ class FastRateDistortionConfig:
             runtime. Set to 0 to use every chunk.
         pretrained_fast_model: HuggingFace model id or local path whose remote
             code supplies the ``UniversalActionProcessor`` class used for fitting.
+        families: Tokenizer families to sweep (``fast`` and/or ``binning``).
+        bin_counts: Per-value binning bin counts for the binning baseline (G3).
+        binning_strategy: Binning edge strategy (``quantile`` or ``uniform``).
+        horizons: Chunk horizons to sweep (G4). The FAST/binning knob sweeps run
+            at the operating point for every horizon; horizon 10 is the main cell.
     """
 
     scales: list[float] = field(default_factory=lambda: [2.0, 5.0, 10.0, 20.0, 50.0])
@@ -42,3 +47,7 @@ class FastRateDistortionConfig:
     near_lossless_tolerance: float = 0.05
     max_chunks: int = 20000
     pretrained_fast_model: str = "physical-intelligence/fast"
+    families: list[str] = field(default_factory=lambda: ["fast", "binning"])
+    bin_counts: list[int] = field(default_factory=lambda: [32, 64, 128, 256, 512, 1024])
+    binning_strategy: str = "quantile"
+    horizons: list[int] = field(default_factory=lambda: [5, 10, 20, 50])

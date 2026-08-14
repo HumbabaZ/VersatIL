@@ -1,7 +1,8 @@
 # @package _global_
-# FAST tokenizer rate-distortion analysis on LIBERO (LeRobot). No model training:
-# fits FAST at each (rounding scale, BPE vocab size) cell on the training-split
-# action chunks and measures rate (bits per chunk) and reconstruction distortion.
+# Extended tokenization-floor study on LIBERO (LeRobot). No model training.
+# Reconstruction layer: FAST (scale, |V|) + per-value Binning across chunk horizons.
+# G1 FAST scale sweep + G2 |V| sweep + G3 Binning sweep at H=10; G4 = each family's
+# operating point across horizons {5,10,20,50}.
 defaults:
   - /task/dataset_schema: libero_lerobot
   - /task/dataloader: libero_lerobot
@@ -25,6 +26,7 @@ rate_distortion:
   near_lossless_tolerance: 0.05
   max_chunks: 20000
   pretrained_fast_model: physical-intelligence/fast
-  # Part-1 behavior: FAST only, single horizon.
-  families: [fast]
-  horizons: [10]
+  families: [fast, binning]
+  bin_counts: [32, 64, 128, 256, 512, 1024]
+  binning_strategy: quantile
+  horizons: [5, 10, 20, 50]

@@ -1,8 +1,9 @@
-"""Hydra endpoint for the FAST tokenizer rate-distortion analysis.
+"""Hydra endpoint for the action-tokenizer rate-distortion / floor study.
 
-Measures the FAST tokenizer floor on LIBERO demonstration action chunks: no model
-training, reconstruction-error distortion only (replay success is stubbed). Writes
-a results table and the rate-distortion figure.
+Reconstruction layer: no model training. Sweeps FAST (scale, |V|) and per-value
+Binning (num_bins) over LIBERO action chunks across chunk horizons, and writes one
+unified results table plus the FAST-vs-Binning and horizon figures. Replay success
+is measured separately (scripts/libero_replay_floor/).
 """
 
 import csv
@@ -12,30 +13,40 @@ from pathlib import Path
 from typing import Any
 
 import hydra
-import matplotlib
+from omegaconf import DictConfig
 
+from versatil.analysis.rate_distortion import plot_floor
+from versatil.analysis.rate_distortion.binning_sweep import run_binning_sweep
 from versatil.analysis.rate_distortion.config import FastRateDistortionConfig
-from versatil.analysis.rate_distortion.data import load_libero_action_chunks
-from versatil.analysis.rate_distortion.fast_sweep import run_sweep
+from versatil.analysis.rate_distortion.data import (
+    chunk_data_at_horizon,
+    load_per_step_context,
+)
+from versatil.analysis.rate_distortion.fast_sweep import (
+    load_fast_class,
+    run_fast_cell,
+    run_fast_grid,
+)
+from versatil.analysis.rate_distortion.metrics import bits_per_step
 from versatil.common.logging import override_log_format
 from versatil.configs.paths import get_hydra_configs_dir
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-from omegaconf import DictConfig  # noqa: E402
-
 EXPERIMENTS_DIR = get_hydra_configs_dir()
+FULL_SWEEP_HORIZON = 10
 
 _CSV_COLUMNS = [
     "family",
+    "horizon",
     "sweep",
     "scale",
     "vocab_size",
+    "num_bins",
     "is_operating_point",
     "feasible",
     "alphabet_size",
     "mean_token_len",
     "bits_per_chunk",
+    "bits_per_step",
     "rmse_continuous",
     "rmse_ee_pos_action",
     "mae_ee_pos_action",
@@ -52,16 +63,16 @@ _CSV_COLUMNS = [
     config_name="rate_distortion/fast_libero",
 )
 def main(config: DictConfig) -> None:
-    """Run the FAST rate-distortion sweep and write results.
+    """Run the reconstruction floor study and write results and figures.
 
     Args:
-        config: Hydra config selecting the LIBERO task and the sweep grid.
+        config: Hydra config selecting the LIBERO task and the sweep grids.
     """
     override_log_format()
     if not config:
         raise ValueError(
             "No configuration specified! Provide --config-name, e.g. "
-            "--config-name rate_distortion/fast_libero"
+            "--config-name rate_distortion/floor_study"
         )
 
     sweep_config: FastRateDistortionConfig = hydra.utils.instantiate(
@@ -71,40 +82,110 @@ def main(config: DictConfig) -> None:
     action_space = hydra.utils.instantiate(config.task.action_space)
     observation_space = hydra.utils.instantiate(config.task.observation_space)
     dataloader_config = hydra.utils.instantiate(config.task.dataloader)
+    seed = int(config.experiment.seed)
 
-    chunk_data = load_libero_action_chunks(
+    horizons = [int(horizon) for horizon in sweep_config.horizons]
+    full_sweep_horizon = (
+        FULL_SWEEP_HORIZON if FULL_SWEEP_HORIZON in horizons else min(horizons)
+    )
+    context = load_per_step_context(
         dataset_schema=dataset_schema,
         action_space=action_space,
         observation_space=observation_space,
         dataloader_config=dataloader_config,
-        prediction_horizon=int(config.task.prediction_horizon),
         observation_horizon=int(config.task.observation_horizon),
-        seed=int(config.experiment.seed),
-        max_chunks=sweep_config.max_chunks,
+        seed=seed,
+        base_horizon=min(horizons),
     )
-    logging.info(
-        "Loaded %d LIBERO action chunks (time_horizon=%d, action_dim=%d).",
-        chunk_data.chunks_normalized.shape[0],
-        chunk_data.time_horizon,
-        chunk_data.action_dim,
+    fast_class = (
+        load_fast_class(sweep_config.pretrained_fast_model)
+        if "fast" in sweep_config.families
+        else None
     )
 
-    rows = run_sweep(chunk_data=chunk_data, config=sweep_config)
+    rows = _run_study(
+        context=context,
+        sweep_config=sweep_config,
+        horizons=horizons,
+        full_sweep_horizon=full_sweep_horizon,
+        fast_class=fast_class,
+        seed=seed,
+    )
 
     output_dir = (
         Path(hydra.utils.get_original_cwd())
         / "outputs"
         / "rate_distortion"
-        / ("fast_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+        / ("floor_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_results_csv(rows=rows, output_path=output_dir / "results.csv")
-    _plot_rate_distortion(rows=rows, output_path=output_dir / "figure_a.png")
-    logging.info("Rate-distortion analysis written to %s", output_dir)
+    plot_floor.plot_all(rows=rows, output_dir=output_dir)
+    logging.info("Floor study written to %s", output_dir)
+
+
+def _run_study(
+    context,
+    sweep_config: FastRateDistortionConfig,
+    horizons: list[int],
+    full_sweep_horizon: int,
+    fast_class: type | None,
+    seed: int,
+) -> list[dict[str, Any]]:
+    """Sweep every family's full knob grid at every horizon.
+
+    Running the full scale/bins sweep per horizon (not just the operating point)
+    is what lets each horizon draw its own rate-distortion frontier; the
+    reconstruction layer is cheap enough to afford it. ``full_sweep_horizon`` marks
+    which horizon also carries the |V| confirmation sweep and the near-lossless
+    sanity check, which only need to run once.
+    """
+    rows: list[dict[str, Any]] = []
+    for horizon in horizons:
+        chunk_data = chunk_data_at_horizon(
+            context=context,
+            horizon=horizon,
+            max_chunks=sweep_config.max_chunks,
+            seed=seed,
+        )
+        logging.info(
+            "horizon=%d: %d chunks", horizon, chunk_data.chunks_normalized.shape[0]
+        )
+        horizon_rows: list[dict[str, Any]] = []
+        if fast_class is not None:
+            if horizon == full_sweep_horizon:
+                horizon_rows += run_fast_grid(
+                    fast_class=fast_class, chunk_data=chunk_data, config=sweep_config
+                )
+            else:
+                horizon_rows += [
+                    run_fast_cell(
+                        fast_class=fast_class,
+                        chunk_data=chunk_data,
+                        scale=scale,
+                        vocab_size=sweep_config.scale_sweep_fixed_vocab,
+                        sweep="scale",
+                        is_operating_point=scale
+                        == sweep_config.vocab_sweep_fixed_scale,
+                    )
+                    for scale in sweep_config.scales
+                ]
+        if "binning" in sweep_config.families:
+            horizon_rows += run_binning_sweep(
+                chunk_data=chunk_data,
+                bin_counts=sweep_config.bin_counts,
+                binning_strategy=sweep_config.binning_strategy,
+            )
+        for row in horizon_rows:
+            row["horizon"] = horizon
+            if row.get("feasible") and "bits_per_chunk" in row:
+                row["bits_per_step"] = bits_per_step(row["bits_per_chunk"], horizon)
+            rows.append(row)
+    return rows
 
 
 def _write_results_csv(rows: list[dict[str, Any]], output_path: Path) -> None:
-    """Write sweep rows to CSV with a stable column order."""
+    """Write study rows to CSV with a stable column order."""
     with open(output_path, "w", newline="") as csv_file:
         writer = csv.DictWriter(
             csv_file, fieldnames=_CSV_COLUMNS, extrasaction="ignore"
@@ -112,35 +193,6 @@ def _write_results_csv(rows: list[dict[str, Any]], output_path: Path) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow({column: row.get(column, "") for column in _CSV_COLUMNS})
-
-
-def _plot_rate_distortion(rows: list[dict[str, Any]], output_path: Path) -> None:
-    """Plot bits-per-chunk versus continuous reconstruction RMSE.
-
-    The scale sweep traces the genuine rate-distortion frontier; the vocabulary
-    sweep is expected to move horizontally (rate changes, distortion flat).
-    """
-    figure, axis = plt.subplots(figsize=(6, 4))
-    for sweep, label, marker in (
-        ("scale", "rounding-scale sweep (|V| fixed)", "o"),
-        ("vocab", "BPE |V| sweep (scale fixed)", "s"),
-    ):
-        points = [
-            (row["bits_per_chunk"], row["rmse_continuous"])
-            for row in rows
-            if row["sweep"] == sweep and row.get("feasible") and "bits_per_chunk" in row
-        ]
-        points.sort()
-        if points:
-            x_values, y_values = zip(*points, strict=True)
-            axis.plot(x_values, y_values, marker=marker, label=label)
-    axis.set_xlabel("rate (bits per chunk)")
-    axis.set_ylabel("continuous reconstruction RMSE (original units)")
-    axis.set_title("FAST tokenizer rate-distortion (LIBERO)")
-    axis.legend()
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=150)
-    plt.close(figure)
 
 
 if __name__ == "__main__":

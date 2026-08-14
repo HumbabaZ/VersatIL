@@ -135,13 +135,15 @@ def run_fast_cell(
     return row
 
 
-def run_sweep(
+def run_fast_grid(
+    fast_class: type,
     chunk_data: ActionChunkData,
     config: FastRateDistortionConfig,
 ) -> list[dict[str, Any]]:
-    """Run the near-lossless check, the scale sweep, and the vocabulary sweep.
+    """Near-lossless check + scale sweep (G1) + vocab sweep (G2) at one horizon.
 
     Args:
+        fast_class: The ``UniversalActionProcessor`` class (loaded once by caller).
         chunk_data: Normalized chunks plus normalizer and layout.
         config: Sweep grid.
 
@@ -151,8 +153,6 @@ def run_sweep(
     Raises:
         ValueError: If the near-lossless sanity check fails.
     """
-    fast_class = load_fast_class(config.pretrained_fast_model)
-
     sanity_row = run_fast_cell(
         fast_class=fast_class,
         chunk_data=chunk_data,
@@ -195,3 +195,15 @@ def run_sweep(
             )
         )
     return rows
+
+
+def run_sweep(
+    chunk_data: ActionChunkData,
+    config: FastRateDistortionConfig,
+) -> list[dict[str, Any]]:
+    """Load the FAST class and run the full grid (single-horizon Part-1 entry)."""
+    return run_fast_grid(
+        fast_class=load_fast_class(config.pretrained_fast_model),
+        chunk_data=chunk_data,
+        config=config,
+    )

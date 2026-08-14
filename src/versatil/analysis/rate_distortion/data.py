@@ -63,42 +63,61 @@ class ActionChunkData:
         return int(self.chunks_normalized.shape[2])
 
 
-def load_libero_action_chunks(
+@dataclass
+class PerStepContext:
+    """Horizon-independent inputs for windowing action chunks at any horizon.
+
+    The per-step normalized actions, the fitted normalizer, the component layout,
+    and the episode boundaries do not depend on the chunk horizon, so a horizon
+    sweep computes them once and re-windows chunks per horizon cheaply.
+
+    Attributes:
+        per_step_actions: Concatenated normalized per-step actions, shape
+            (num_steps, action_dim).
+        normalizer: Training-fitted normalizer.
+        layout: Per-component placement inside ``action_dim``.
+        episode_ends: Cumulative episode end indices.
+        episode_selection_mask: Boolean mask of training-split episodes.
+    """
+
+    per_step_actions: np.ndarray
+    normalizer: LinearNormalizer
+    layout: list[ActionComponentLayout]
+    episode_ends: np.ndarray
+    episode_selection_mask: np.ndarray
+
+
+def load_per_step_context(
     dataset_schema,
     action_space: ActionSpace,
     observation_space: ObservationSpace,
     dataloader_config: DataLoaderConfig,
-    prediction_horizon: int,
     observation_horizon: int,
     seed: int,
-    max_chunks: int = 0,
-) -> ActionChunkData:
-    """Build normalized action chunks and the fitted normalizer from LIBERO.
+    base_horizon: int = 10,
+) -> PerStepContext:
+    """Build the horizon-independent per-step actions, normalizer, and boundaries.
 
     Args:
         dataset_schema: Instantiated dataset schema pointing at the zarr store.
         action_space: Instantiated action space (LIBERO precomputed actions).
         observation_space: Instantiated observation space.
-        dataloader_config: Data-loading settings; supplies the normalization type
-            and winsorization used at training time.
-        prediction_horizon: Chunk length.
-        observation_horizon: History length (unused for actions, required by the
-            dataset).
-        seed: Split/subsampling seed, matching the training split.
-        max_chunks: Optional cap on the number of chunks. 0 uses every chunk.
+        dataloader_config: Data-loading settings; supplies normalization type and
+            winsorization used at training time.
+        observation_horizon: History length required by the dataset.
+        seed: Split seed, matching the training split.
+        base_horizon: Chunk horizon used only to construct the dataset's sampler;
+            it does not affect the per-step actions, normalizer, or boundaries.
 
     Returns:
-        The normalized chunks, the fitted normalizer, and the component layout.
-
-    Raises:
-        ValueError: If no episode is long enough to form a single chunk.
+        The reusable per-step context.
     """
     dataset = EpisodicDataset(
         zarr_path=dataset_schema.zarr_path,
         action_space=action_space,
         observation_space=observation_space,
         dataloader_config=dataloader_config,
-        pred_horizon=prediction_horizon,
+        pred_horizon=base_horizon,
         obs_horizon=observation_horizon,
         train=True,
         seed=seed,
@@ -116,19 +135,71 @@ def load_libero_action_chunks(
         min_kinematics_range=dataloader_config.min_kinematics_range,
         action_sample_size=0,
     )
-
     per_step_actions, layout = _compute_normalized_per_step_actions(
         dataset=dataset, normalizer=normalizer
     )
-    chunks = _window_selected_episodes(
+    return PerStepContext(
         per_step_actions=per_step_actions,
-        episode_ends=dataset.episode_ends,
-        episode_selection_mask=dataset.episode_selection_mask,
-        prediction_horizon=prediction_horizon,
+        normalizer=normalizer,
+        layout=layout,
+        episode_ends=np.asarray(dataset.episode_ends),
+        episode_selection_mask=np.asarray(dataset.episode_selection_mask),
+    )
+
+
+def chunk_data_at_horizon(
+    context: PerStepContext,
+    horizon: int,
+    max_chunks: int = 0,
+    seed: int = 42,
+) -> ActionChunkData:
+    """Window the per-step context into fixed-length chunks at one horizon."""
+    chunks = _window_selected_episodes(
+        per_step_actions=context.per_step_actions,
+        episode_ends=context.episode_ends,
+        episode_selection_mask=context.episode_selection_mask,
+        prediction_horizon=horizon,
     )
     chunks = _subsample_chunks(chunks=chunks, max_chunks=max_chunks, seed=seed)
     return ActionChunkData(
-        chunks_normalized=chunks, normalizer=normalizer, layout=layout
+        chunks_normalized=chunks,
+        normalizer=context.normalizer,
+        layout=context.layout,
+    )
+
+
+def load_libero_action_chunks(
+    dataset_schema,
+    action_space: ActionSpace,
+    observation_space: ObservationSpace,
+    dataloader_config: DataLoaderConfig,
+    prediction_horizon: int,
+    observation_horizon: int,
+    seed: int,
+    max_chunks: int = 0,
+) -> ActionChunkData:
+    """Build normalized action chunks and the fitted normalizer at one horizon.
+
+    Thin wrapper over :func:`load_per_step_context` + :func:`chunk_data_at_horizon`
+    kept for the single-horizon reconstruction endpoint.
+
+    Raises:
+        ValueError: If no episode is long enough to form a single chunk.
+    """
+    context = load_per_step_context(
+        dataset_schema=dataset_schema,
+        action_space=action_space,
+        observation_space=observation_space,
+        dataloader_config=dataloader_config,
+        observation_horizon=observation_horizon,
+        seed=seed,
+        base_horizon=prediction_horizon,
+    )
+    return chunk_data_at_horizon(
+        context=context,
+        horizon=prediction_horizon,
+        max_chunks=max_chunks,
+        seed=seed,
     )
 
 
