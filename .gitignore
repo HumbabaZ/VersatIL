@@ -148,6 +148,7 @@ a/yaml_configs/custom_configs/*
 
 .venv*
 .codex 
+.claude
 
 lightning_logs/
 src/endpoints/local_test/

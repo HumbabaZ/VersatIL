@@ -22,6 +22,9 @@ class DeploymentConfig:
         max_steps: Maximum environment steps before the client stops.
         compile_model: Whether the policy is compiled with torch.compile.
         client: Socket inference client settings.
+        token_usage_output: JSONL path for capturing predicted action tokens
+            during the rollout. None disables capture and leaves inference
+            untouched.
     """
 
     checkpoint_path: str = MISSING
@@ -30,3 +33,4 @@ class DeploymentConfig:
     max_steps: int = 1_000_000
     compile_model: bool = True
     client: InferenceClientConfig = field(default_factory=InferenceClientConfig)
+    token_usage_output: str | None = None

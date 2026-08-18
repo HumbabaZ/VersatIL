@@ -33,7 +33,10 @@ class FastRateDistortionConfig:
             code supplies the ``UniversalActionProcessor`` class used for fitting.
         families: Tokenizer families to sweep (``fast`` and/or ``binning``).
         bin_counts: Per-value binning bin counts for the binning baseline (G3).
-        binning_strategy: Binning edge strategy (``quantile`` or ``uniform``).
+        binning_strategies: Binning edge strategies to sweep. ``uniform`` is the
+            variant the trained policies and the replay study use (OpenVLA-style,
+            fixed [-1, 1] support); ``quantile`` places data-adaptive edges and
+            serves as the stronger reference baseline.
         horizons: Chunk horizons to sweep (G4). The FAST/binning knob sweeps run
             at the operating point for every horizon; horizon 10 is the main cell.
     """
@@ -49,5 +52,7 @@ class FastRateDistortionConfig:
     pretrained_fast_model: str = "physical-intelligence/fast"
     families: list[str] = field(default_factory=lambda: ["fast", "binning"])
     bin_counts: list[int] = field(default_factory=lambda: [32, 64, 128, 256, 512, 1024])
-    binning_strategy: str = "quantile"
+    binning_strategies: list[str] = field(
+        default_factory=lambda: ["uniform", "quantile"]
+    )
     horizons: list[int] = field(default_factory=lambda: [5, 10, 20, 50])

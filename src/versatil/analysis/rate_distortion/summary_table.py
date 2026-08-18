@@ -56,11 +56,21 @@ def load_rows(csv_path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+TRAINING_STRATEGY = "uniform"
+
+
 def _knob_label(row: dict[str, Any]) -> str:
     """Human label for a config's knob (FAST scale / binning bin count)."""
     if row["family"] == "fast":
         return f"scale={row['scale']:g}"
     return f"bins={int(row['num_bins'])}"
+
+
+def _variant_label(row: dict[str, Any]) -> str:
+    """Tokenizer variant name: FAST, or binning tagged with its edge strategy."""
+    if row["family"] != "binning":
+        return row["family"]
+    return f"binning ({row.get('binning_strategy') or TRAINING_STRATEGY})"
 
 
 def _table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -72,11 +82,11 @@ def _table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         and row.get("horizon") == FULL_SWEEP_HORIZON
         and row.get("sweep") in ("scale", "bins")
     ]
-    order = {"fast": 0, "binning": 1}
+    order = {"fast": 0, f"binning ({TRAINING_STRATEGY})": 1}
 
     def sort_key(row: dict[str, Any]) -> tuple[int, float]:
         knob = row.get("scale") if row["family"] == "fast" else row.get("num_bins")
-        return (order.get(row["family"], 9), knob if knob is not None else 0.0)
+        return (order.get(_variant_label(row), 8), knob if knob is not None else 0.0)
 
     return sorted(selected, key=sort_key)
 
@@ -86,6 +96,7 @@ def write_reconstruction_table(rows: list[dict[str, Any]], output_dir: Path) -> 
     header = [
         "tokenizer",
         "config",
+        "binning_strategy",
         "pos_mae_mm",
         "rot_mae_deg",
         "tokens_per_chunk",
@@ -97,8 +108,9 @@ def write_reconstruction_table(rows: list[dict[str, Any]], output_dir: Path) -> 
     for row in _table_rows(rows):
         records.append(
             {
-                "tokenizer": row["family"],
+                "tokenizer": _variant_label(row),
                 "config": _knob_label(row),
+                "binning_strategy": row.get("binning_strategy", ""),
                 "pos_mae_mm": row["mae_ee_pos_action"] * POS_MM_PER_UNIT,
                 "rot_mae_deg": row["mae_ee_ori_action"] * ROT_DEG_PER_UNIT,
                 "tokens_per_chunk": row["mean_token_len"],
@@ -180,6 +192,7 @@ def write_compression_ratio(rows: list[dict[str, Any]], output_dir: Path) -> Non
             if row.get("feasible")
             and row["family"] == "binning"
             and row.get("horizon") == FULL_SWEEP_HORIZON
+            and (row.get("binning_strategy") or TRAINING_STRATEGY) == TRAINING_STRATEGY
         ),
         key=lambda r: r["num_bins"],
     )
@@ -213,7 +226,8 @@ def write_compression_ratio(rows: list[dict[str, Any]], output_dir: Path) -> Non
 
     text = [
         "FAST vs Binning compression at matched reconstruction "
-        "(libero_all, H=10, chunk=1 s @ 10 fps).",
+        f"(libero_all, H=10, binning variant = {TRAINING_STRATEGY}, "
+        "i.e. the variant the trained policies and the replay study use).",
         "Ratio = binning tokens/chunk / FAST tokens/chunk at equal RMSE "
         "(FAST tokens interpolated on its RMSE->tokens frontier).",
         "",

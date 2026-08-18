@@ -28,5 +28,7 @@ rate_distortion:
   pretrained_fast_model: physical-intelligence/fast
   families: [fast, binning]
   bin_counts: [32, 64, 128, 256, 512, 1024]
-  binning_strategy: quantile
+  # uniform = the variant the trained policies and the replay study use;
+  # quantile = data-adaptive edges, reported as the stronger reference baseline.
+  binning_strategies: [uniform, quantile]
   horizons: [5, 10, 20, 50]

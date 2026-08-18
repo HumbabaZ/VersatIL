@@ -5,8 +5,13 @@ config: the ``scienceplots`` toolkit and the qualitative ``tab10`` palette (``ta
 when a figure needs more than ten series), assigned in fixed order. Axes carry
 Title-Case labels with units and a light dashed grid; FAST's dominated
 (Pareto-inferior) points are hollow off the frontier line and called out in the
-legend. The rate-distortion frontier is coloured by chunk horizon; the
-compression-distortion frontier is coloured by tokenizer family.
+legend.
+
+A *series* is a tokenizer variant: FAST, plus one curve per binning strategy.
+``uniform`` binning is the variant the trained policies and the open-loop replay
+study use (OpenVLA-style, fixed [-1, 1] support), so it is the primary binning
+curve; ``quantile`` binning places data-adaptive edges and is reported as the
+stronger reference baseline.
 
 Runnable directly from a results CSV (no versatil import, no re-run of the sweep):
 
@@ -36,33 +41,43 @@ plt.rcParams.update({"font.size": 11, "figure.dpi": 150, "savefig.dpi": 300})
 # needs more than ten distinguishable series.
 _TAB10_SIZE = 10
 
-FAMILY_LABEL = {"fast": "FAST", "binning": "Binning"}
+SERIES_ORDER = ("fast", "binning:uniform", "binning:quantile")
+SERIES_LABEL = {
+    "fast": "FAST",
+    "binning:uniform": "Binning (uniform)",
+    "binning:quantile": "Binning (quantile)",
+}
+SERIES_MARKER = {"fast": "o", "binning:uniform": "s", "binning:quantile": "^"}
+SERIES_LINESTYLE = {"fast": "-", "binning:uniform": "--", "binning:quantile": ":"}
 FAMILY_KNOB_KEY = {"fast": "scale", "binning": "num_bins"}
 FAMILY_KNOB_PREFIX = {"fast": "s", "binning": "b"}
-FAMILY_MARKER = {"fast": "o", "binning": "s"}
-FAMILY_LINESTYLE = {"fast": "-", "binning": "--"}
-FAMILY_ORDER = ("fast", "binning")
+PRIMARY_SERIES = ("fast", "binning:uniform")
+# Bin count used as each binning variant's representative point in horizon plots.
+REPRESENTATIVE_BINS = 256
 DOMINATED_LABEL = "Dominated (off Frontier)"
 FULL_SWEEP_HORIZON = 10
 
 
 def choose_colors(count: int) -> list:
-    """Return ``count`` qualitative colors in fixed order (tab10, else tab20).
-
-    Categorical hues are assigned in a fixed order so a series keeps its color
-    across figures and re-runs.
-    """
+    """Return ``count`` qualitative colors in fixed order (tab10, else tab20)."""
     colormap = plt.get_cmap("tab10" if count <= _TAB10_SIZE else "tab20")
     return [colormap(index) for index in range(count)]
 
 
-def plot_all(rows: list[dict[str, Any]], output_dir: Path) -> dict[str, dict]:
-    """Write all floor-study figures; return the colors assigned to each series.
+def series_key(row: dict[str, Any]) -> str:
+    """Series identifier for a result row (``fast`` or ``binning:<strategy>``)."""
+    if row["family"] != "binning":
+        return row["family"]
+    return f"binning:{row.get('binning_strategy') or 'uniform'}"
 
-    Args:
-        rows: Parsed study rows.
-        output_dir: Directory to write the figures into.
-    """
+
+def _family_of(series: str) -> str:
+    """Tokenizer family behind a series key."""
+    return series.split(":", maxsplit=1)[0]
+
+
+def plot_all(rows: list[dict[str, Any]], output_dir: Path) -> dict[str, dict]:
+    """Write all floor-study figures; return the colors assigned to each series."""
     horizons = sorted(
         {
             int(r["horizon"])
@@ -75,25 +90,31 @@ def plot_all(rows: list[dict[str, Any]], output_dir: Path) -> dict[str, dict]:
         if horizons
         else {}
     )
-    families = [
-        family for family in FAMILY_ORDER if any(r["family"] == family for r in rows)
-    ]
-    family_colors = dict(zip(families, choose_colors(len(families)), strict=True))
+    present = [s for s in SERIES_ORDER if any(series_key(r) == s for r in rows)]
+    series_colors = dict(zip(present, choose_colors(len(present)), strict=True))
 
     plot_frontier_by_horizon(rows, output_dir / "figure_a_frontier.png", horizon_colors)
-    plot_family_frontier(
+    plot_series_frontier(
         rows,
         output_dir / "figure_a_frontier_h10.png",
-        family_colors,
+        series_colors,
         x_key="bits_per_step",
         x_label="Rate (Bits per Timestep)",
         title="Tokenizer Rate-Distortion Frontier",
     )
-    plot_tokens_frontier(rows, output_dir / "figure_tokens_frontier.png", family_colors)
-    plot_horizon_effect(rows, output_dir / "figure_horizon.png", family_colors)
-    plot_vocab_flat(rows, output_dir / "figure_vocab_flat.png", family_colors)
+    plot_series_frontier(
+        rows,
+        output_dir / "figure_tokens_frontier.png",
+        series_colors,
+        x_key="mean_token_len",
+        x_label="Sequence Length (Tokens per Chunk)",
+        title="Tokenizer Compression-Distortion Frontier",
+        thin_binning=True,
+    )
+    plot_horizon_effect(rows, output_dir / "figure_horizon.png", series_colors)
+    plot_vocab_flat(rows, output_dir / "figure_vocab_flat.png", series_colors)
     return {
-        "families": {f: to_hex(c) for f, c in family_colors.items()},
+        "series": {s: to_hex(c) for s, c in series_colors.items()},
         "horizons": {h: to_hex(c) for h, c in horizon_colors.items()},
     }
 
@@ -103,175 +124,172 @@ def plot_frontier_by_horizon(
 ) -> None:
     """Rate-distortion frontier, one colour per chunk horizon.
 
-    Marker/line-style encode the family (FAST circles + solid, Binning squares +
-    dashed). At H = 10 the full scale/bins sweeps trace each frontier and are knob-
-    annotated; other horizons contribute their operating point. FAST's dominated
-    points are hollow.
+    Restricted to the primary series (FAST and uniform binning) so that horizon,
+    not tokenizer variant, is the visual dimension. Marker/line-style encode the
+    series; H = 10 additionally carries knob annotations.
     """
     if not horizon_colors:
         return
     figure, axis = plt.subplots(figsize=(6.8, 4.6))
     for horizon in sorted(horizon_colors):
         color = horizon_colors[horizon]
-        for family in FAMILY_ORDER:
-            points = _labeled_points(
-                rows,
-                "bits_per_step",
-                "rmse_continuous",
-                FAMILY_KNOB_KEY[family],
-                lambda r, fam=family, h=horizon: (
-                    r["family"] == fam
-                    and r.get("horizon") == h
-                    and _in_frontier_sweep(r, fam)
-                ),
-            )
+        for series in PRIMARY_SERIES:
+            points = _series_points(rows, series, "bits_per_step", horizon)
             if not points:
                 continue
-            _draw_line(axis, family, points, color, mark_dominated=(family == "fast"))
+            _draw_line(axis, series, points, color)
             if horizon == FULL_SWEEP_HORIZON:
-                _annotate(axis, family, points, color)
+                _annotate(axis, series, points, color)
     _style_axis(axis)
     axis.set_xlabel("Rate (Bits per Timestep)")
     axis.set_ylabel("Reconstruction RMSE (Normalized Action Units)")
     axis.set_title("Tokenizer Rate-Distortion Frontier")
-    _frontier_by_horizon_legend(axis, horizon_colors)
+    handles = [
+        Line2D([], [], color=horizon_colors[h], lw=2, label=f"H = {h}")
+        for h in sorted(horizon_colors)
+    ]
+    handles += [_series_handle(s, "0.35") for s in PRIMARY_SERIES]
+    handles.append(_dominated_handle())
+    axis.legend(handles=handles, fontsize=8)
     _save(figure, output_path)
 
 
-def plot_tokens_frontier(
-    rows: list[dict[str, Any]], output_path: Path, family_colors: dict
-) -> None:
-    """Compression-distortion frontier at H = 10, one colour per family.
-
-    Binning is a fixed-length ``T*D`` vertical (dashed); its points are thinned so
-    the bin-count labels never overlap. FAST is solid with its dominated point
-    hollow. X axis is sequence length (tokens/chunk).
-    """
-    plot_family_frontier(
-        rows,
-        output_path,
-        family_colors,
-        x_key="mean_token_len",
-        x_label="Sequence Length (Tokens per Chunk)",
-        title="Tokenizer Compression-Distortion Frontier",
-        thin_binning=True,
-    )
-
-
-def plot_family_frontier(
+def plot_series_frontier(
     rows: list[dict[str, Any]],
     output_path: Path,
-    family_colors: dict,
+    series_colors: dict,
     x_key: str,
     x_label: str,
     title: str,
     thin_binning: bool = False,
 ) -> None:
-    """Single-horizon frontier coloured by tokenizer family (FAST blue, Binning orange).
+    """Single-horizon frontier with one colour per tokenizer variant.
 
     ``x_key`` selects the horizontal axis: ``bits_per_step`` (rate) or
     ``mean_token_len`` (sequence length). ``thin_binning`` drops crowded binning
-    points so their bin-count labels stay legible on the fixed-length vertical.
+    points so their bin-count labels stay legible on the fixed-length verticals.
     """
     horizon = FULL_SWEEP_HORIZON
-    family_points = {}
-    for family in FAMILY_ORDER:
-        if family not in family_colors:
+    drawn = {}
+    for series in SERIES_ORDER:
+        if series not in series_colors:
             continue
-        points = _labeled_points(
-            rows,
-            x_key,
-            "rmse_continuous",
-            FAMILY_KNOB_KEY[family],
-            lambda r, fam=family: (
-                r["family"] == fam
-                and _in_frontier_sweep(r, fam)
-                and r.get("horizon") == horizon
-            ),
-        )
+        points = _series_points(rows, series, x_key, horizon)
         if points:
-            family_points[family] = points
-    if not family_points:
+            drawn[series] = points
+    if not drawn:
         return
 
-    all_y = [point[1] for points in family_points.values() for point in points]
+    all_y = [p[1] for points in drawn.values() for p in points]
     min_gap = 0.09 * (max(all_y) - min(all_y))
-    figure, axis = plt.subplots(figsize=(6.4, 4.4))
-    for family, points in family_points.items():
-        color = family_colors[family]
-        if thin_binning and family == "binning":
+    figure, axis = plt.subplots(figsize=(6.6, 4.4))
+    for series, points in drawn.items():
+        color = series_colors[series]
+        if thin_binning and _family_of(series) == "binning":
             points = _thin_by_gap(sorted(points, key=lambda p: p[1]), min_gap)
-        _draw_line(axis, family, points, color, mark_dominated=(family == "fast"))
-        _annotate(axis, family, points, color)
+        _draw_line(axis, series, points, color)
+        _annotate(axis, series, points, color)
     _style_axis(axis)
     axis.set_xlabel(x_label)
     axis.set_ylabel("Reconstruction RMSE (Normalized Action Units)")
     axis.set_title(f"{title} (H = {horizon})")
-    handles = [
-        _family_handle(family, family_colors[family]) for family in family_points
-    ]
+    handles = [_series_handle(s, series_colors[s]) for s in drawn]
     handles.append(_dominated_handle())
-    axis.legend(handles=handles, title="Tokenizer")
+    axis.legend(handles=handles, title="Tokenizer", fontsize=8)
     _save(figure, output_path)
 
 
 def plot_horizon_effect(
-    rows: list[dict[str, Any]], output_path: Path, family_colors: dict
+    rows: list[dict[str, Any]], output_path: Path, series_colors: dict
 ) -> None:
-    """Horizon effect at operating points: RMSE (flat expected) and bits/step."""
+    """Horizon effect at each series' representative configuration.
+
+    The series sit at their own operating points (FAST scale=10/|V|=1024, binning
+    256 bins) and therefore at very different rates, so *levels are not
+    comparable across series here*; only the trend in H is. The left panel
+    consequently plots distortion **relative to each series' own H = 10 value**,
+    which makes horizon-independence directly readable and structurally prevents
+    a cross-series level comparison; absolute values appear in the legend and in
+    the reconstruction table. Cross-tokenizer comparison belongs to the
+    rate-distortion frontier, where rate is on the axis.
+
+    The right panel shows rate vs H. The two binning curves coincide exactly,
+    because ``D log2 B`` does not depend on the binning variant.
+    """
 
     def operating(row: dict[str, Any]) -> bool:
+        if row["family"] == "binning":
+            return int(row.get("num_bins") or 0) == REPRESENTATIVE_BINS
         return bool(row.get("is_operating_point"))
 
-    families = [
-        family
-        for family in FAMILY_ORDER
-        if family in family_colors
+    present = [
+        series
+        for series in SERIES_ORDER
+        if series in series_colors
         and any(
-            r["family"] == family and operating(r) and r.get("feasible") for r in rows
+            series_key(r) == series and operating(r) and r.get("feasible") for r in rows
         )
     ]
-    if not families:
+    if not present:
         return
     figure, (left, right) = plt.subplots(1, 2, figsize=(10, 4.2))
-    for family in families:
-        color = family_colors[family]
+    for series in present:
+        color = series_colors[series]
         for axis, key in ((left, "rmse_continuous"), (right, "bits_per_step")):
             points = _labeled_points(
                 rows,
                 "horizon",
                 key,
                 "horizon",
-                lambda r, fam=family: r["family"] == fam and operating(r),
+                lambda r, s=series: series_key(r) == s and operating(r),
             )
             if not points:
                 continue
             points.sort()
+            values = [p[1] for p in points]
+            if axis is left:
+                # Index to this series' own H = 10 value: the series sit at very
+                # different rates, so only the trend in H is comparable.
+                reference = _reference_value(points, FULL_SWEEP_HORIZON)
+                label = f"{SERIES_LABEL[series]} (H=10: {reference:.4f})"
+                values = [value / reference for value in values]
+            else:
+                label = SERIES_LABEL[series]
             axis.plot(
                 [p[0] for p in points],
-                [p[1] for p in points],
-                marker=FAMILY_MARKER[family],
-                linestyle=FAMILY_LINESTYLE[family],
+                values,
+                marker=SERIES_MARKER[series],
+                linestyle=SERIES_LINESTYLE[series],
                 color=color,
-                label=FAMILY_LABEL[family],
+                label=label,
             )
+    left.axhline(1.0, color="0.6", linewidth=0.8, zorder=1)
+    left.set_ylim(0.8, 1.2)
     left.set_xlabel("Chunk Horizon H")
-    left.set_ylabel("Reconstruction RMSE (Normalized Action Units)")
+    left.set_ylabel("Reconstruction RMSE, Relative to H = 10")
     left.set_title("Reconstruction Floor vs Horizon")
     right.set_xlabel("Chunk Horizon H")
     right.set_ylabel("Rate (Bits per Timestep)")
     right.set_title("Rate vs Horizon")
     for axis in (left, right):
         _style_axis(axis)
-        axis.legend(title="Tokenizer")
+        axis.legend(title="Tokenizer", fontsize=7)
     _save(figure, output_path)
 
 
+def _reference_value(points: list[tuple[float, float, float]], horizon: int) -> float:
+    """Value at ``horizon`` if present, else the first point's value."""
+    for x_value, y_value, _ in points:
+        if int(x_value) == horizon:
+            return y_value
+    return points[0][1]
+
+
 def plot_vocab_flat(
-    rows: list[dict[str, Any]], output_path: Path, family_colors: dict
+    rows: list[dict[str, Any]], output_path: Path, series_colors: dict
 ) -> None:
     """|V| sweep: distortion must be flat as rate moves (lossless rate knob)."""
-    if "fast" not in family_colors:
+    if "fast" not in series_colors:
         return
     horizon = FULL_SWEEP_HORIZON
     points = _labeled_points(
@@ -288,7 +306,7 @@ def plot_vocab_flat(
     if not points:
         return
     points.sort()
-    color = family_colors["fast"]
+    color = series_colors["fast"]
     figure, axis = plt.subplots(figsize=(6.4, 4.4))
     axis.plot(
         [p[0] for p in points],
@@ -314,28 +332,34 @@ def plot_vocab_flat(
     _save(figure, output_path)
 
 
-def _in_frontier_sweep(row: dict[str, Any], family: str) -> bool:
-    """Whether a row is a frontier point for its family (scale/horizon vs bins)."""
-    if family == "fast":
-        return row.get("sweep") in ("scale", "horizon")
-    return row.get("sweep") == "bins"
+def _series_points(
+    rows: list[dict[str, Any]], series: str, x_key: str, horizon: int
+) -> list[tuple[float, float, float]]:
+    """Frontier points (x, rmse, knob) of one series at one horizon."""
+    family = _family_of(series)
+    sweeps = ("scale", "horizon") if family == "fast" else ("bins",)
+    return _labeled_points(
+        rows,
+        x_key,
+        "rmse_continuous",
+        FAMILY_KNOB_KEY[family],
+        lambda r, s=series, sw=sweeps, h=horizon: (
+            series_key(r) == s and r.get("sweep") in sw and r.get("horizon") == h
+        ),
+    )
 
 
 def _draw_line(
-    axis,
-    family: str,
-    points: list[tuple[float, float, float]],
-    color,
-    mark_dominated: bool,
+    axis, series: str, points: list[tuple[float, float, float]], color
 ) -> None:
-    """Draw a family's line + markers; hollow the dominated points when asked."""
-    frontier, dominated = _pareto_split(points) if mark_dominated else (points, [])
+    """Draw a series' frontier line; dominated points are hollow and off the line."""
+    frontier, dominated = _pareto_split(points)
     frontier_sorted = sorted(frontier)
     axis.plot(
-        [point[0] for point in frontier_sorted],
-        [point[1] for point in frontier_sorted],
-        marker=FAMILY_MARKER[family],
-        linestyle=FAMILY_LINESTYLE[family],
+        [p[0] for p in frontier_sorted],
+        [p[1] for p in frontier_sorted],
+        marker=SERIES_MARKER[series],
+        linestyle=SERIES_LINESTYLE[series],
         color=color,
         zorder=3,
     )
@@ -343,7 +367,7 @@ def _draw_line(
         axis.scatter(
             [point[0]],
             [point[1]],
-            marker=FAMILY_MARKER[family],
+            marker=SERIES_MARKER[series],
             facecolors="none",
             edgecolors=color,
             zorder=3,
@@ -351,24 +375,21 @@ def _draw_line(
 
 
 def _annotate(
-    axis, family: str, points: list[tuple[float, float, float]], color
+    axis, series: str, points: list[tuple[float, float, float]], color
 ) -> None:
     """Annotate each point with its knob value."""
+    prefix = FAMILY_KNOB_PREFIX[_family_of(series)]
+    is_fast = _family_of(series) == "fast"
     for x_value, y_value, knob in points:
+        text = f"{prefix}={knob:g}" if is_fast else f"{prefix}={int(knob)}"
         axis.annotate(
-            _knob_text(family, knob),
+            text,
             (x_value, y_value),
             color=color,
             fontsize=8,
             xytext=(4, 3),
             textcoords="offset points",
         )
-
-
-def _knob_text(family: str, knob: float) -> str:
-    """Label for a point's knob (FAST scale as-is, binning bin count as int)."""
-    prefix = FAMILY_KNOB_PREFIX[family]
-    return f"{prefix}={knob:g}" if family == "fast" else f"{prefix}={int(knob)}"
 
 
 def _thin_by_gap(
@@ -385,26 +406,15 @@ def _thin_by_gap(
     return kept
 
 
-def _frontier_by_horizon_legend(axis, horizon_colors: dict) -> None:
-    """Legend combining horizon colours, family markers, and the dominated cue."""
-    handles = [
-        Line2D([], [], color=horizon_colors[horizon], lw=2, label=f"H = {horizon}")
-        for horizon in sorted(horizon_colors)
-    ]
-    handles += [_family_handle(family, "0.35") for family in FAMILY_ORDER]
-    handles.append(_dominated_handle())
-    axis.legend(handles=handles, fontsize=8, ncol=1)
-
-
-def _family_handle(family: str, color) -> Line2D:
-    """Legend handle showing a family's marker and line style."""
+def _series_handle(series: str, color) -> Line2D:
+    """Legend handle showing a series' marker and line style."""
     return Line2D(
         [],
         [],
         color=color,
-        marker=FAMILY_MARKER[family],
-        linestyle=FAMILY_LINESTYLE[family],
-        label=FAMILY_LABEL[family],
+        marker=SERIES_MARKER[series],
+        linestyle=SERIES_LINESTYLE[series],
+        label=SERIES_LABEL[series],
     )
 
 

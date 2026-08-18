@@ -19,6 +19,9 @@ from versatil.data.tokenization.action_discretizer import BinnedActionDiscretize
 
 FAMILY = "binning"
 OPERATING_POINT_BINS = 256
+# The binning variant the trained policies and the replay study use (OpenVLA-style
+# uniform bins on a fixed [-1, 1] support); the operating point is marked on it.
+TRAINING_STRATEGY = "uniform"
 
 
 def run_binning_cell(
@@ -48,7 +51,9 @@ def run_binning_cell(
         "family": FAMILY,
         "sweep": "bins",
         "num_bins": num_bins,
-        "is_operating_point": num_bins == OPERATING_POINT_BINS,
+        "binning_strategy": binning_strategy,
+        "is_operating_point": num_bins == OPERATING_POINT_BINS
+        and binning_strategy == TRAINING_STRATEGY,
         "feasible": True,
     }
     row.update(
@@ -67,8 +72,9 @@ def run_binning_cell(
         )
     )
     logging.info(
-        "Binning cell num_bins=%s: bits/chunk=%.1f continuous_rmse=%.5f",
+        "Binning cell num_bins=%s (%s): bits/chunk=%.1f continuous_rmse=%.5f",
         num_bins,
+        binning_strategy,
         row["bits_per_chunk"],
         row.get("rmse_continuous", float("nan")),
     )

@@ -265,6 +265,31 @@ class ActionTokenizer:
             return self.decode_batch(tokens)
         raise ValueError(f"Expected 1D or 2D input, got shape {token_ids_array.shape}")
 
+    def to_local_token_ids(
+        self, tokens: torch.Tensor | list[int] | np.ndarray
+    ) -> np.ndarray:
+        """Strip special tokens and map one model sequence to local action IDs.
+
+        Returns the local discrete IDs the discretizer emitted, without decoding
+        them to continuous actions. Used for token-usage analysis where the
+        training and rollout streams must be counted in the same local ID space.
+
+        Args:
+            tokens: 1D model token IDs with shape (token_sequence_len,), possibly
+                including EOS and trailing padding IDs.
+
+        Returns:
+            Local action IDs with EOS and padding removed.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Tokenizer must be fitted or loaded before mapping")
+        token_ids_array = self._to_numpy_tokens(tokens)
+        if token_ids_array.ndim != 1:
+            raise ValueError(
+                f"Expected 1D tokens, got shape {token_ids_array.shape}"
+            )
+        return self._strip_and_unmap_tokens(token_ids_array)
+
     def to(self, device: torch.device) -> "ActionTokenizer":
         """Move tokenizer tensors to a device."""
         self.device = device
@@ -360,12 +385,21 @@ class ActionTokenizer:
         return self.token_id_mapping.decode(valid_tokens).astype(np.int64)
 
     def _strip_decode_special_tokens(self, tokens: np.ndarray) -> np.ndarray:
-        """Remove EOS and trailing padding without dropping valid zero token IDs."""
+        """Remove EOS and trailing padding without dropping valid zero token IDs.
+
+        Padding is only ever appended after EOS, so a sequence with no EOS
+        carries no padding. Fixed-length discretizers generate exactly their
+        payload with no EOS, so a trailing pad-valued token (for example bin 0)
+        is then a real action token and must be kept; stripping it would corrupt
+        the chunk length and break decoding.
+        """
         token_ids_array = np.asarray(tokens)
         if self.eos_token_id is not None:
             eos_indices = np.flatnonzero(token_ids_array == self.eos_token_id)
             if eos_indices.size > 0:
                 return token_ids_array[: eos_indices[0]]
+            if self.action_discretizer.fixed_token_count is not None:
+                return token_ids_array
 
         end_index = token_ids_array.shape[0]
         while end_index > 0 and token_ids_array[end_index - 1] == self.pad_token_id:

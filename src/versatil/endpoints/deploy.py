@@ -7,6 +7,7 @@ import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from versatil.analysis.token_usage.rollout_sink import RolloutTokenSink
 from versatil.common.logging import override_log_format
 from versatil.configs.paths import get_hydra_configs_dir
 from versatil.inference.inference_client import InferenceClient
@@ -93,6 +94,14 @@ def main(config: DictConfig) -> None:
         compile_model=config.compile_model,
     )
 
+    token_usage_sink = None
+    if config.token_usage_output is not None:
+        token_usage_sink = RolloutTokenSink(output_path=config.token_usage_output)
+        policy_runtime.policy.set_token_usage_sink(sink=token_usage_sink)
+        logging.info(
+            f"Capturing rollout action tokens to {config.token_usage_output}"
+        )
+
     observation_transport = SocketObservationTransport(
         server_address=config.client.model_server_address,
         server_port=config.client.model_server_port,
@@ -121,6 +130,9 @@ def main(config: DictConfig) -> None:
     except KeyboardInterrupt:
         logging.info("Shutting down client...")
     finally:
+        if token_usage_sink is not None:
+            flushed_path = token_usage_sink.flush()
+            logging.info(f"Wrote rollout action tokens to {flushed_path}")
         client.shutdown()
 
 

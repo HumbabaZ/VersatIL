@@ -41,6 +41,7 @@ _CSV_COLUMNS = [
     "scale",
     "vocab_size",
     "num_bins",
+    "binning_strategy",
     "is_operating_point",
     "feasible",
     "alphabet_size",
@@ -171,11 +172,12 @@ def _run_study(
                     for scale in sweep_config.scales
                 ]
         if "binning" in sweep_config.families:
-            horizon_rows += run_binning_sweep(
-                chunk_data=chunk_data,
-                bin_counts=sweep_config.bin_counts,
-                binning_strategy=sweep_config.binning_strategy,
-            )
+            for binning_strategy in sweep_config.binning_strategies:
+                horizon_rows += run_binning_sweep(
+                    chunk_data=chunk_data,
+                    bin_counts=sweep_config.bin_counts,
+                    binning_strategy=binning_strategy,
+                )
         for row in horizon_rows:
             row["horizon"] = horizon
             if row.get("feasible") and "bits_per_chunk" in row:

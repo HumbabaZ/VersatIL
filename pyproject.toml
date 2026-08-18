@@ -61,6 +61,7 @@ dependencies = [
   "pytorch-lightning>=2.6",
   "pyyaml>=6.0",
   "safetensors>=0.6",
+  "scienceplots>=2.1",
   "scikit-learn>=1.7.1",
   "scipy>=1.16",
   "seaborn>=0.13",

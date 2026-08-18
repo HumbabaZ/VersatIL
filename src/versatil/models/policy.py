@@ -1,5 +1,7 @@
 """Policy module that handles the sequence of input encoding, output decoding, and loss computation."""
 
+from typing import Protocol, runtime_checkable
+
 import torch
 import torch.nn as nn
 
@@ -23,6 +25,14 @@ from versatil.models.decoding.constants import DecoderOutputKey
 from versatil.models.decoding.decoders.base import ActionDecoder
 from versatil.models.encoding.encoders.constants import EncoderOutputKeys
 from versatil.models.encoding.pipeline import EncodingPipeline
+
+
+@runtime_checkable
+class TokenUsageSink(Protocol):
+    """Receives predicted action token IDs during rollout for usage analysis."""
+
+    def record(self, action_tokens: torch.Tensor) -> None:
+        """Record one prediction's model-vocab action token IDs."""
 
 
 def build_algorithm_features(
@@ -120,6 +130,7 @@ class Policy(nn.Module):
         self.normalizer: LinearNormalizer = LinearNormalizer()
         self.tokenizer = None  # Set later via set_tokenizer()
         self.denoising_thresholds = DictOfTensorMixin()
+        self._token_usage_sink: TokenUsageSink | None = None
 
     @property
     def input_keys(self) -> list[str]:
@@ -160,6 +171,14 @@ class Policy(nn.Module):
         self.tokenizer = tokenizer
         self.encoding_pipeline.set_tokenizer(tokenizer)
         self.decoder.set_tokenizer(tokenizer)
+
+    def set_token_usage_sink(self, sink: TokenUsageSink | None) -> None:
+        """Attach a sink that records predicted action tokens during rollout.
+
+        Leaving the sink unset keeps inference untouched; when set, every
+        tokenized-action prediction is forwarded to the sink before detokenizing.
+        """
+        self._token_usage_sink = sink
 
     def set_denoising_thresholds(self, thresholds: dict[str, float]) -> None:
         """Set the denoising thresholds from training data.
@@ -399,6 +418,8 @@ class Policy(nn.Module):
         predictions = self.algorithm.predict(features=features, network=self.decoder)
         if DecoderOutputKey.PREDICTED_ACTION_TOKENS.value in predictions:
             action_tokens = predictions[DecoderOutputKey.PREDICTED_ACTION_TOKENS.value]
+            if self._token_usage_sink is not None:
+                self._token_usage_sink.record(action_tokens=action_tokens)
             if self.tokenizer is None or self.tokenizer.action_tokenizer is None:
                 raise RuntimeError(
                     "Action tokenizer not set. Cannot detokenize actions."

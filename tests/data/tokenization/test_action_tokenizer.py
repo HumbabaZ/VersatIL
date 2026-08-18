@@ -1065,6 +1065,54 @@ class TestActionTokenizerUniformBinning:
         with pytest.raises(ValueError, match=re.escape(expected_message)):
             tokenizer.decode_chunk(torch.tensor([1, 2, tokenizer.eos_token_id]))
 
+    def test_decode_chunk_keeps_trailing_bin_zero_without_eos(self):
+        tokenizer = ActionTokenizer(
+            action_discretizer=BinnedActionDiscretizer(
+                num_bins=4, min_value=-1.0, max_value=1.0
+            ),
+            max_token_len=16,
+            pad_token_id=0,
+        )
+        tokenizer.fit(np.zeros((1, 2, 3), dtype=np.float32))
+        # Full-length (T*D=6) generated chunk, no EOS, final token is bin 0,
+        # which equals pad_token_id; it is a real action token and must be kept.
+        decoded = tokenizer.decode_chunk(torch.tensor([1, 2, 3, 2, 1, 0]))
+        assert decoded.shape == (2, 3)
+
+
+class TestActionTokenizerToLocalTokenIds:
+    def test_strips_special_tokens_and_returns_local_ids(self):
+        tokenizer = ActionTokenizer(
+            action_discretizer=BinnedActionDiscretizer(
+                num_bins=4,
+                min_value=-1.0,
+                max_value=1.0,
+            ),
+            max_token_len=16,
+        )
+        training_data = np.array(
+            [[[-1.0, 0.0, 1.0], [0.25, -0.25, 0.99]]],
+            dtype=np.float32,
+        )
+        tokenizer.fit(training_data)
+        tokens = tokenizer.encode_chunk(training_data[0])[
+            SampleKey.TOKENIZED_ACTIONS.value
+        ]
+
+        local_ids = tokenizer.to_local_token_ids(tokens)
+
+        np.testing.assert_array_equal(local_ids, np.array([0, 2, 3, 2, 1, 3]))
+
+    def test_rejects_two_dimensional_tokens(self):
+        tokenizer = ActionTokenizer(
+            action_discretizer=BinnedActionDiscretizer(num_bins=4),
+            max_token_len=16,
+        )
+        tokenizer.fit(np.zeros((1, 2, 3), dtype=np.float32))
+
+        with pytest.raises(ValueError, match=re.escape("Expected 1D tokens, got shape (2, 3)")):
+            tokenizer.to_local_token_ids(torch.zeros((2, 3), dtype=torch.long))
+
 
 class TestActionTokenizerTo:
     def test_to_updates_device(self, action_tokenizer_factory, device):

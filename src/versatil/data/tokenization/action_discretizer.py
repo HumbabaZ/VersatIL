@@ -32,6 +32,16 @@ class ActionDiscretizer(ABC):
     def is_fitted(self) -> bool:
         """Whether the discretizer can encode and decode actions."""
 
+    @property
+    def fixed_token_count(self) -> int | None:
+        """Per-chunk token count for fixed-length discretizers, else None.
+
+        Fixed-length discretizers emit exactly this many action tokens per
+        chunk with no EOS or padding at inference; variable-length discretizers
+        return None and terminate generation with EOS.
+        """
+        return None
+
     @abstractmethod
     def fit(self, action_chunks: np.ndarray) -> None:
         """Fit on chunks with shape (num_chunks, time_horizon, action_dim)."""
@@ -155,18 +165,33 @@ class FastActionDiscretizer(ActionDiscretizer):
         ]
         return np.stack(decoded_actions)
 
-    def _decode_fast_token_sequence(self, token_sequence: list[int]) -> np.ndarray:
-        """Decode one FAST BPE stream with local DCT length fix."""
+    def bpe_ids_to_coefficient_tokens(self, bpe_local_ids: list[int]) -> np.ndarray:
+        """Reverse BPE on local FAST token IDs to the quantized DCT coefficients.
+
+        Returns the fixed-length integer DCT coefficient sequence recovered
+        before the inverse DCT and scale division. These are the
+        metric-structured symbols one level below the BPE vocabulary, used for
+        token-usage analysis at the coefficient level.
+
+        Args:
+            bpe_local_ids: One chunk's local FAST BPE token IDs.
+
+        Returns:
+            Coefficient values of length ``time_horizon * action_dim``.
+        """
         if self.processor is None:
             raise RuntimeError("FAST processor not initialized")
         if self.time_horizon is None or self.action_dim is None:
-            raise RuntimeError("FAST action discretizer shape is unknown")
+            raise RuntimeError(
+                "FAST action discretizer shape is unknown; encode or load a "
+                "fitted discretizer before recovering coefficient tokens"
+            )
         bpe_tokenizer = getattr(self.processor, "bpe_tokenizer", None)
         if bpe_tokenizer is None:
             raise RuntimeError("FAST processor does not expose a BPE tokenizer")
 
         expected_coefficient_count = self.time_horizon * self.action_dim
-        token_array = np.asarray(token_sequence, dtype=np.int64)
+        token_array = np.asarray(bpe_local_ids, dtype=np.int64)
         clipped_token_array = np.clip(token_array, 0, self.token_count - 1)
         if not np.array_equal(clipped_token_array, token_array):
             logging.warning(
@@ -174,16 +199,19 @@ class FastActionDiscretizer(ActionDiscretizer):
                 f"[0, {self.token_count - 1}]; clipping before decode. "
                 "Decoded actions may be degraded."
             )
-        token_array = clipped_token_array
-        decoded_tokens = bpe_tokenizer.decode(token_array.tolist())
+        decoded_tokens = bpe_tokenizer.decode(clipped_token_array.tolist())
         if not isinstance(decoded_tokens, str):
             raise TypeError(
                 f"Expected str from FAST BPE tokenizer decode, got {type(decoded_tokens)}"
             )
-        coefficients = self._decoded_tokens_to_coefficients(
+        return self._decoded_tokens_to_coefficients(
             decoded_tokens=decoded_tokens,
             expected_coefficient_count=expected_coefficient_count,
         )
+
+    def _decode_fast_token_sequence(self, token_sequence: list[int]) -> np.ndarray:
+        """Decode one FAST BPE stream with local DCT length fix."""
+        coefficients = self.bpe_ids_to_coefficient_tokens(bpe_local_ids=token_sequence)
         coefficient_matrix = coefficients.reshape(self.time_horizon, self.action_dim)
         return idct(
             coefficient_matrix / self._processor_scale(),
@@ -319,6 +347,13 @@ class BinnedActionDiscretizer(ActionDiscretizer):
     def is_fitted(self) -> bool:
         """Whether bin edges have been fitted."""
         return self.binner._is_fitted
+
+    @property
+    def fixed_token_count(self) -> int | None:
+        """Fixed per-chunk token count once the chunk shape is known."""
+        if self.time_horizon is None or self.action_dim is None:
+            return None
+        return self.time_horizon * self.action_dim
 
     def fit(self, action_chunks: np.ndarray) -> None:
         """Fit bin edges from shape (num_chunks, time_horizon, action_dim)."""

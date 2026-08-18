@@ -6,6 +6,7 @@ evaluate them against expert demonstrations using mode coverage and goal
 success metrics.
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from versatil.analysis.token_usage.rollout_sink import RolloutTokenSink
 from versatil.configs import MainConfig
 from versatil.data.constants import Cameras, ProprioKey, SyntheticObsKey
 from versatil.data.synthetic.constants import (
@@ -84,6 +86,7 @@ def run_rollouts(
     temporal_aggregation: bool = False,
     exponential_decay: float = 0.01,
     output_dir: str | None = None,
+    token_usage_output: str | None = None,
 ) -> np.ndarray:
     """Re-render and re-predict at each timestep with temporal aggregation.
 
@@ -109,6 +112,9 @@ def run_rollouts(
             Smaller values produce more uniform weighting across queries.
         output_dir: Optional directory for saving PNG + GIF visualizations
             of the rollout trajectories. If None, no visualizations are saved.
+        token_usage_output: Optional JSONL path for capturing predicted action
+            tokens per rollout. If None, no tokens are captured and inference is
+            untouched.
 
     Returns:
         Position trajectories, shape (num_rollouts, prediction_horizon + 1, 2).
@@ -132,7 +138,16 @@ def run_rollouts(
         (num_rollouts, prediction_horizon + 1, 2), dtype=np.float32
     )
 
+    token_usage_sink = None
+    if token_usage_output is not None:
+        token_usage_sink = RolloutTokenSink(output_path=token_usage_output)
+        policy.set_token_usage_sink(sink=token_usage_sink)
+
     for rollout_index in range(num_rollouts):
+        if token_usage_sink is not None:
+            token_usage_sink.set_context(
+                context={"rollout_index": rollout_index, "task_name": task_name}
+            )
         positions = all_trajectories[rollout_index]
         positions[0] = start.copy()
 
@@ -223,6 +238,11 @@ def run_rollouts(
                         positions[step] + action_deltas[chunk_offset], 0.0, 1.0
                     )
                     step += 1
+
+    if token_usage_sink is not None:
+        flushed_path = token_usage_sink.flush()
+        policy.set_token_usage_sink(sink=None)
+        logging.info(f"Wrote rollout action tokens to {flushed_path}")
 
     if output_dir is not None:
         name_prefix = "rollout_temporal_agg" if temporal_aggregation else "rollout"
