@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from omegaconf import MISSING
 
 from versatil.configs.data.raw.zarr_meta import DatasetMetadataConfig
+from versatil.data.synthetic.constants import NoiseInjection
 
 
 @dataclass
@@ -64,6 +65,18 @@ class SyntheticDatasetSchemaConfig(DatasetSchemaConfig):
         num_styles: Number of visual styles used for conditional variants.
         mode_weights: Sampling weight per behavior mode.
         num_rollouts: Rollouts sampled per mode when evaluating coverage metrics.
+        noise_smoothing_sigma: Gaussian temporal smoothing width, in timesteps,
+            applied to the injected noise. 0 keeps the high band; larger values
+            move the action noise to lower frequencies at matched power.
+        noise_injection: Where the noise enters, from ``NoiseInjection``.
+            ``position`` perturbs the trajectory, so images, clamping and
+            rejection sampling move with it; ``action`` keeps those clean and
+            perturbs only the action labels.
+        eval_reference_noise_std: Noise level for the expert reference used by
+            rollout evaluation. None reuses ``noise_std``. Pin it when sweeping
+            noise: the reference sets the mode centroids, the success threshold
+            and the radial obstacle geometry, so letting it follow the training
+            noise loosens the bar exactly where performance should degrade.
     """
 
     task_name: str = MISSING
@@ -76,6 +89,9 @@ class SyntheticDatasetSchemaConfig(DatasetSchemaConfig):
     num_styles: int = 1
     mode_weights: list[float] | None = None
     num_rollouts: int = 200
+    noise_smoothing_sigma: float = 0.0
+    noise_injection: str = NoiseInjection.POSITION.value
+    eval_reference_noise_std: float | None = None
 
 
 @dataclass

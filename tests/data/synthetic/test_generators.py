@@ -24,12 +24,14 @@ from versatil.data.synthetic.constants import (
     SEQUENTIAL_OBSTACLES,
     SEQUENTIAL_SECOND_BRANCH_X_DELTA,
     SEQUENTIAL_START,
+    NoiseInjection,
     SyntheticTaskName,
 )
 from versatil.data.synthetic.generators import (
     _add_noise_and_clamp,
     _apply_sinusoidal_style,
     _balanced_mode_counts,
+    _build_trajectory_signals,
     _compute_actions,
     _compute_corridor_gap_centers,
     _compute_corridor_gap_height,
@@ -37,8 +39,11 @@ from versatil.data.synthetic.generators import (
     _generate_radial_obstacles,
     _interpolate_waypoints,
     _parametric_circle,
+    _RejectionStats,
     _resolve_mode_counts,
+    _sample_action_noise,
     _sample_noisy_trajectory_no_collision,
+    _sample_position_noise,
     _trajectory_collides,
     _weighted_mode_counts,
     generate_task_episodes,
@@ -133,6 +138,150 @@ def test_add_noise_and_clamp_clips_out_of_range_trajectory(
     )
 
     np.testing.assert_array_equal(result, np.ones_like(trajectory))
+
+
+@pytest.mark.unit
+def test_sample_position_noise_zero_smoothing_is_temporally_uncorrelated(
+    rng: np.random.Generator,
+):
+    noise = _sample_position_noise(
+        shape=(256, 2),
+        noise_std=0.05,
+        smoothing_sigma=0.0,
+        random_generator=rng,
+    )
+
+    assert noise.shape == (256, 2)
+    series = noise[:, 0]
+    correlation = np.corrcoef(series[:-1], series[1:])[0, 1]
+    assert abs(correlation) < 0.2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("smoothing_sigma", [0.0, 1.0, 2.0, 4.0])
+def test_sample_position_noise_matches_action_noise_power_across_bands(
+    smoothing_sigma: float,
+    rng: np.random.Generator,
+):
+    """Every frequency band must inject the same action-noise power.
+
+    Actions are position differences, so the quantity held fixed is
+    ``Var(eta_{t+1} - eta_t) = 2 * noise_std ** 2``. Without this, a
+    high-band vs low-band comparison would confound spectrum with amplitude.
+    """
+    noise_std = 0.02
+
+    action_noise = np.concatenate(
+        [
+            np.diff(
+                _sample_position_noise(
+                    shape=(60, 2),
+                    noise_std=noise_std,
+                    smoothing_sigma=smoothing_sigma,
+                    random_generator=rng,
+                ),
+                axis=0,
+            )
+            for _ in range(400)
+        ]
+    )
+
+    assert action_noise.std() == pytest.approx(np.sqrt(2.0) * noise_std, rel=0.05)
+
+
+@pytest.mark.unit
+def test_sample_position_noise_smoothing_moves_action_noise_to_low_band(
+    rng: np.random.Generator,
+):
+    """Smoothing must shift action-noise energy away from the Nyquist end.
+
+    This is the mechanism the discrete-vs-continuous noise study depends on:
+    unsmoothed position noise yields high-frequency action noise by
+    construction, smoothed position noise does not.
+    """
+    num_steps = 60
+
+    def high_band_fraction(smoothing_sigma: float) -> float:
+        action_noise = np.stack(
+            [
+                np.diff(
+                    _sample_position_noise(
+                        shape=(num_steps, 2),
+                        noise_std=0.02,
+                        smoothing_sigma=smoothing_sigma,
+                        random_generator=rng,
+                    ),
+                    axis=0,
+                )[:, 0]
+                for _ in range(400)
+            ]
+        )
+        power = (np.abs(np.fft.rfft(action_noise, axis=1)) ** 2).mean(axis=0)
+        frequencies = np.fft.rfftfreq(num_steps - 1)
+        return float(power[frequencies > 0.25].sum() / power.sum())
+
+    assert high_band_fraction(smoothing_sigma=0.0) > 0.7
+    assert high_band_fraction(smoothing_sigma=2.0) < 0.1
+
+
+@pytest.mark.unit
+def test_add_noise_and_clamp_smoothing_stays_in_unit_square(
+    trajectory_factory: Callable[..., np.ndarray],
+    rng: np.random.Generator,
+):
+    trajectory = trajectory_factory(num_points=20, fill_value=0.5)
+
+    result = _add_noise_and_clamp(
+        trajectory=trajectory,
+        noise_std=0.1,
+        random_generator=rng,
+        noise_smoothing_sigma=2.0,
+    )
+
+    assert result.shape == trajectory.shape
+    assert result.dtype == np.float32
+    assert result.min() >= 0.0
+    assert result.max() <= 1.0
+
+
+@pytest.mark.unit
+def test_rejection_stats_records_attempts_and_rejection_rate():
+    stats = _RejectionStats()
+
+    stats.record(attempts=1)
+    stats.record(attempts=3)
+
+    assert stats.mean_attempts == pytest.approx(2.0)
+    # 2 accepted episodes drawn from 4 samples in total.
+    assert stats.rejection_rate == pytest.approx(0.5)
+
+
+@pytest.mark.unit
+def test_rejection_stats_empty_reports_zero():
+    stats = _RejectionStats()
+
+    assert stats.mean_attempts == 0.0
+    assert stats.rejection_rate == 0.0
+
+
+@pytest.mark.unit
+def test_sample_noisy_trajectory_records_rejection_stats(
+    trajectory_factory: Callable[..., np.ndarray],
+    rng: np.random.Generator,
+):
+    trajectory = trajectory_factory(num_points=10, fill_value=0.5)
+    stats = _RejectionStats()
+
+    _sample_noisy_trajectory_no_collision(
+        base_trajectory=trajectory,
+        obstacles=[],
+        noise_std=0.01,
+        random_generator=rng,
+        rejection_stats=stats,
+    )
+
+    # With no obstacles the first sample is always accepted.
+    assert stats.attempts_per_episode == [1]
 
 
 @pytest.mark.unit
@@ -849,7 +998,8 @@ def test_sample_noisy_trajectory_no_collision_raises_when_geometry_too_tight(
         RuntimeError,
         match=re.escape(
             f"Failed to generate a collision-free trajectory after "
-            f"{MAX_TRAJECTORY_RETRIES} attempts (obstacle geometry too tight)."
+            f"{MAX_TRAJECTORY_RETRIES} attempts (obstacle geometry too tight "
+            f"for noise_std="
         ),
     ):
         _sample_noisy_trajectory_no_collision(
@@ -1095,3 +1245,104 @@ def test_generate_task_episodes_passes_mode_weights(
     ]
     assert mode_counts == [8, 2]
     assert sum(mode_counts) == num_episodes
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("smoothing_sigma", [0.0, 2.0])
+@pytest.mark.parametrize("noise_std", [0.012, 0.048])
+def test_sample_action_noise_matches_position_path_power(
+    rng: np.random.Generator, smoothing_sigma: float, noise_std: float
+):
+    """Both bands deliver the sqrt(2)*noise_std the position path induces."""
+    noise = _sample_action_noise(
+        shape=(4096, 2),
+        noise_std=noise_std,
+        smoothing_sigma=smoothing_sigma,
+        random_generator=rng,
+    )
+
+    assert noise.std() == pytest.approx(np.sqrt(2.0) * noise_std, rel=0.05)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "smoothing_sigma, expects_high_band", [(0.0, True), (2.0, False)]
+)
+def test_sample_action_noise_places_energy_in_requested_band(
+    rng: np.random.Generator, smoothing_sigma: float, expects_high_band: bool
+):
+    """smoothing_sigma selects the band; 0 is the high band, positive the low."""
+    noise = _sample_action_noise(
+        shape=(2048, 2),
+        noise_std=0.02,
+        smoothing_sigma=smoothing_sigma,
+        random_generator=rng,
+    )
+
+    spectrum = np.abs(np.fft.rfft(noise, axis=0)) ** 2
+    high_band_share = float(
+        spectrum[spectrum.shape[0] // 2 :].sum() / spectrum[1:].sum()
+    )
+
+    assert (high_band_share > 0.5) is expects_high_band
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("smoothing_sigma", [0.0, 2.0])
+def test_sample_action_noise_consumes_one_draw_per_element(
+    smoothing_sigma: float,
+):
+    """Draw size must not depend on the band, or episode shuffling desyncs."""
+    shape = (32, 2)
+    reference = np.random.default_rng(0)
+    reference.normal(0.0, 1.0, size=shape)
+    expected_state = reference.bit_generator.state["state"]
+
+    generator = np.random.default_rng(0)
+    _sample_action_noise(
+        shape=shape,
+        noise_std=0.01,
+        smoothing_sigma=smoothing_sigma,
+        random_generator=generator,
+    )
+
+    assert generator.bit_generator.state["state"] == expected_state
+
+
+@pytest.mark.unit
+def test_build_trajectory_signals_leaves_positions_clean_for_action_noise(
+    rng: np.random.Generator,
+):
+    """Action-label noise must not move positions, images or clamping."""
+    trajectory = _interpolate_waypoints(
+        waypoints=[(0.2, 0.1), (0.5, 0.5), (0.8, 0.9)], num_points=20
+    )
+
+    positions, actions = _build_trajectory_signals(
+        trajectory=trajectory,
+        noise_std=0.05,
+        noise_smoothing_sigma=0.0,
+        noise_injection=NoiseInjection.ACTION.value,
+        random_generator=rng,
+    )
+
+    np.testing.assert_allclose(positions, np.clip(trajectory, 0.0, 1.0), atol=1e-6)
+    assert not np.allclose(actions, _compute_actions(positions))
+
+
+@pytest.mark.unit
+def test_build_trajectory_signals_rejects_unknown_injection(
+    rng: np.random.Generator,
+):
+    trajectory = _interpolate_waypoints(
+        waypoints=[(0.2, 0.1), (0.8, 0.9)], num_points=10
+    )
+
+    with pytest.raises(ValueError, match="Unknown noise_injection"):
+        _build_trajectory_signals(
+            trajectory=trajectory,
+            noise_std=0.01,
+            noise_smoothing_sigma=0.0,
+            noise_injection="somewhere_else",
+            random_generator=rng,
+        )

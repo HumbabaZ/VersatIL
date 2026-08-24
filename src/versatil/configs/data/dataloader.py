@@ -60,6 +60,14 @@ class DataLoaderConfig:
             (e.g. chunk-space mixture-density). Set to 0 to disable.
             Memory cost per action key is : ``action_sample_size *
             prediction_horizon * action_dim * bytes_per_element``.
+        normalizer_state_path: : Optional path to a normalizer state dict
+            saved by ``versatil.endpoints.fit_normalizer``. When set, the
+            fitted statistics are replaced by the stored ones before the
+            action tokenizer is built, so several runs can share one
+            normalization. Required for sweeps that perturb the action
+            data itself: refitting per run would otherwise rescale the
+            action range and silently change how coarsely a fixed-support
+            discretizer resolves the signal. ``None`` refits per run.
     """
 
     preload_data_in_memory: bool = False  # Whether to preload the entire zarr into RAM, speeds up training considerably but works only for small datasets.
@@ -109,3 +117,4 @@ class DataLoaderConfig:
     #: Number of action chunk windows to stash on the normalizer per action key for
     #: downstream data-aware initialization
     action_sample_size: int = 2048
+    normalizer_state_path: str | None = None

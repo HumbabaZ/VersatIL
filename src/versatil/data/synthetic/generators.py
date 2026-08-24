@@ -4,6 +4,10 @@ Each task produces episodes with controlled multimodality in [0, 1]x[0, 1]
 Cartesian space. Actions are fixed delta positions: action[t] = position[t+1] - position[t].
 """
 
+import logging
+import math
+from dataclasses import dataclass, field
+
 import numpy as np
 
 from versatil.data.synthetic.constants import (
@@ -21,12 +25,14 @@ from versatil.data.synthetic.constants import (
     DEFAULT_IMAGE_SIZE,
     DEFAULT_NUM_EPISODES,
     DEFAULT_SEED,
+    GAUSSIAN_KERNEL_TRUNCATE,
     MAX_TRAJECTORY_RETRIES,
     MULTIPATH_DEFAULT_NOISE_STD,
     MULTIPATH_DEFAULT_NUM_MODES,
     MULTIPATH_DEFAULT_TRAJECTORY_LENGTH,
     RADIAL_CENTER,
     RADIAL_RADIUS,
+    REJECTION_ATTEMPTS_WARN_THRESHOLD,
     SEQUENTIAL_ENDPOINT_Y,
     SEQUENTIAL_FIRST_BRANCH_X_DELTA,
     SEQUENTIAL_FORK_TRANSITION_OFFSET,
@@ -36,9 +42,77 @@ from versatil.data.synthetic.constants import (
     SEQUENTIAL_OBSTACLES,
     SEQUENTIAL_SECOND_BRANCH_X_DELTA,
     SEQUENTIAL_START,
+    NoiseInjection,
     SyntheticTaskName,
 )
 from versatil.data.synthetic.renderer import render_episode
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _RejectionStats:
+    """Accumulate collision-rejection attempts across generated episodes.
+
+    Rejection sampling conditions injected noise on being collision-free.
+    That truncation strengthens as noise grows, so a noise sweep needs this
+    recorded per configuration: if attempts saturate at the high-noise end,
+    those cells carry less noise than requested and are not interpretable.
+    """
+
+    attempts_per_episode: list[int] = field(default_factory=list)
+
+    def record(self, attempts: int) -> None:
+        """Record the attempt count that produced one accepted episode.
+
+        Args:
+            attempts: Number of samples drawn, including the accepted one.
+        """
+        self.attempts_per_episode.append(attempts)
+
+    @property
+    def mean_attempts(self) -> float:
+        """Mean attempts per accepted episode (1.0 means no rejection)."""
+        if not self.attempts_per_episode:
+            return 0.0
+        return float(np.mean(self.attempts_per_episode))
+
+    @property
+    def rejection_rate(self) -> float:
+        """Fraction of drawn samples that were rejected."""
+        total = int(np.sum(self.attempts_per_episode))
+        if total == 0:
+            return 0.0
+        return 1.0 - len(self.attempts_per_episode) / total
+
+    def log_summary(self, task_name: str, noise_std: float) -> None:
+        """Log the rejection summary, warning when truncation is material.
+
+        Args:
+            task_name: Task the statistics were collected for.
+            noise_std: Noise level the statistics were collected at.
+        """
+        if not self.attempts_per_episode:
+            return
+        message = (
+            "synthetic rejection sampling: task=%s noise_std=%.6g "
+            "mean_attempts=%.3f rejection_rate=%.4f max_attempts=%d"
+        )
+        args = (
+            task_name,
+            noise_std,
+            self.mean_attempts,
+            self.rejection_rate,
+            max(self.attempts_per_episode),
+        )
+        if self.mean_attempts > REJECTION_ATTEMPTS_WARN_THRESHOLD:
+            logger.warning(
+                message + " -- injected noise is materially truncated; treat this "
+                "configuration as not interpretable in a noise sweep",
+                *args,
+            )
+        else:
+            logger.info(message, *args)
 
 
 def generate_task_episodes(
@@ -51,6 +125,8 @@ def generate_task_episodes(
     noise_std: float = MULTIPATH_DEFAULT_NOISE_STD,
     num_styles: int = CORRIDOR_DEFAULT_NUM_STYLES,
     mode_weights: list[float] | None = None,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """Generate synthetic episodes for a given task.
 
@@ -71,6 +147,19 @@ def generate_task_episodes(
             (corridor_navigation task only).
         mode_weights: Relative weights per mode for imbalanced generation.
             None for uniform distribution across modes.
+        noise_smoothing_sigma: Gaussian temporal smoothing width in
+            timesteps applied to the injected position noise. 0 (default)
+            keeps the i.i.d. noise whose first difference is high-frequency
+            action noise; larger values move that action noise to lower
+            frequencies while holding its power fixed, which supports
+            controlled high-band vs low-band robustness comparisons. See
+            :func:`_sample_position_noise`.
+        noise_injection: ``NoiseInjection`` value choosing where the noise
+            enters. ``position`` (default) perturbs the trajectory, so the
+            noise also changes images, clamping and rejection sampling.
+            ``action`` leaves positions and images clean and perturbs only the
+            action labels, at the same action-noise power. See
+            :func:`_sample_action_noise`.
 
     Returns:
         List of episode dicts. Each dict contains:
@@ -81,6 +170,52 @@ def generate_task_episodes(
             "context": conditioning context vector, shape (T, C), float32
     """
     random_generator = np.random.default_rng(seed)
+    # Shuffling is decoupled from the noise-sampling stream and derived from
+    # `seed` on its own, so the pre-shuffle episode order -- fixed by the mode
+    # loop, independent of noise_std/band/injection -- ends up permuted the same
+    # way regardless of how many random draws generation consumed. Coupling them
+    # (shuffling with the same generator right after sampling) let low-band
+    # position noise, which pads its draw with `2 * radius` extra samples,
+    # desync a noisy store's episode order from its zero-noise reference: index i
+    # in one store no longer matched index i in the other, so any per-episode
+    # diff between them -- exactly what SNR measurement needs -- compared
+    # unrelated trajectories.
+    shuffle_generator = np.random.default_rng(np.random.SeedSequence(seed).spawn(1)[0])
+    episodes = _generate_task_episodes_unshuffled(
+        task_name=task_name,
+        num_episodes=num_episodes,
+        random_generator=random_generator,
+        image_size=image_size,
+        num_modes=num_modes,
+        trajectory_length=trajectory_length,
+        noise_std=noise_std,
+        num_styles=num_styles,
+        mode_weights=mode_weights,
+        noise_smoothing_sigma=noise_smoothing_sigma,
+        noise_injection=noise_injection,
+    )
+    shuffle_generator.shuffle(episodes)
+    return episodes
+
+
+def _generate_task_episodes_unshuffled(
+    task_name: str,
+    num_episodes: int,
+    random_generator: np.random.Generator,
+    image_size: int,
+    num_modes: int,
+    trajectory_length: int,
+    noise_std: float,
+    num_styles: int,
+    mode_weights: list[float] | None,
+    noise_smoothing_sigma: float,
+    noise_injection: str,
+) -> list[dict[str, np.ndarray]]:
+    """Dispatch to the task generator; episode order still reflects the mode loop.
+
+    Raises:
+        ValueError: If ``task_name`` is not a known ``SyntheticTaskName``.
+    """
     match task_name:
         case SyntheticTaskName.CIRCLE.value:
             return _generate_circle(
@@ -90,6 +225,8 @@ def generate_task_episodes(
                 trajectory_length=trajectory_length,
                 noise_std=noise_std,
                 mode_weights=mode_weights,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
             )
         case SyntheticTaskName.CONDITIONAL_CIRCLE.value:
             return _generate_conditional_circle(
@@ -99,6 +236,8 @@ def generate_task_episodes(
                 trajectory_length=trajectory_length,
                 noise_std=noise_std,
                 mode_weights=mode_weights,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
             )
         case SyntheticTaskName.SEQUENTIAL_DECISION.value:
             return _generate_sequential_decision(
@@ -108,6 +247,8 @@ def generate_task_episodes(
                 trajectory_length=trajectory_length,
                 noise_std=noise_std,
                 mode_weights=mode_weights,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
             )
         case SyntheticTaskName.RADIAL.value:
             return _generate_radial(
@@ -118,6 +259,8 @@ def generate_task_episodes(
                 trajectory_length=trajectory_length,
                 noise_std=noise_std,
                 mode_weights=mode_weights,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
             )
         case SyntheticTaskName.CORRIDOR_NAVIGATION.value:
             return _generate_corridor_navigation(
@@ -129,6 +272,8 @@ def generate_task_episodes(
                 trajectory_length=trajectory_length,
                 noise_std=noise_std,
                 mode_weights=mode_weights,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
             )
         case _:
             raise ValueError(f"Unknown synthetic task: {task_name}")
@@ -141,6 +286,8 @@ def _generate_circle(
     trajectory_length: int,
     noise_std: float,
     mode_weights: list[float] | None,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """Traverse one of two tangent circles as a closed loop.
 
@@ -155,6 +302,8 @@ def _generate_circle(
         trajectory_length=trajectory_length,
         noise_std=noise_std,
         mode_weights=mode_weights,
+        noise_smoothing_sigma=noise_smoothing_sigma,
+        noise_injection=noise_injection,
         use_context=False,
     )
 
@@ -166,6 +315,8 @@ def _generate_conditional_circle(
     trajectory_length: int,
     noise_std: float,
     mode_weights: list[float] | None,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """Same layout as circle but with a one-hot context signal per mode.
 
@@ -179,6 +330,8 @@ def _generate_conditional_circle(
         trajectory_length=trajectory_length,
         noise_std=noise_std,
         mode_weights=mode_weights,
+        noise_smoothing_sigma=noise_smoothing_sigma,
+        noise_injection=noise_injection,
         use_context=True,
     )
 
@@ -191,6 +344,8 @@ def _generate_circle_episodes(
     noise_std: float,
     mode_weights: list[float] | None,
     use_context: bool,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """Shared implementation for circle and conditional_circle tasks.
 
@@ -222,12 +377,13 @@ def _generate_circle_episodes(
                 num_points=trajectory_length,
                 clockwise=True,
             )
-            positions = _add_noise_and_clamp(
+            positions, actions = _build_trajectory_signals(
                 trajectory=positions,
                 noise_std=noise_std,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
                 random_generator=random_generator,
             )
-            actions = _compute_actions(positions)
             images = render_episode(
                 positions=positions,
                 obstacles=CIRCLE_OBSTACLES,
@@ -250,7 +406,6 @@ def _generate_circle_episodes(
                     "context": context,
                 }
             )
-    random_generator.shuffle(episodes)
     return episodes
 
 
@@ -261,6 +416,8 @@ def _generate_sequential_decision(
     trajectory_length: int,
     noise_std: float,
     mode_weights: list[float] | None,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """Navigate upward from (0.5, 0) with two sequential left/right forks.
 
@@ -313,12 +470,13 @@ def _generate_sequential_decision(
             positions = _interpolate_waypoints(
                 waypoints=waypoints, num_points=trajectory_length
             )
-            positions = _add_noise_and_clamp(
+            positions, actions = _build_trajectory_signals(
                 trajectory=positions,
                 noise_std=noise_std,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
                 random_generator=random_generator,
             )
-            actions = _compute_actions(positions)
             images = render_episode(
                 positions=positions,
                 obstacles=SEQUENTIAL_OBSTACLES,
@@ -335,7 +493,6 @@ def _generate_sequential_decision(
                     "context": context,
                 }
             )
-    random_generator.shuffle(episodes)
     return episodes
 
 
@@ -347,6 +504,8 @@ def _generate_radial(
     trajectory_length: int,
     noise_std: float,
     mode_weights: list[float] | None,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """K straight-line trajectories from center to K evenly-spaced points on a circle.
 
@@ -360,7 +519,18 @@ def _generate_radial(
         num_modes=num_modes,
         mode_weights=mode_weights,
     )
-    obstacles = _generate_radial_obstacles(num_modes=num_modes, noise_std=noise_std)
+    # The margin only needs to shrink when noise actually reaches positions.
+    # Under action-only injection the trajectory stays exactly on its clean
+    # path, so sizing obstacles off noise_std here would shrink the rendered
+    # scene for a reason the trajectory never experiences -- the same "clean
+    # observations" violation the action-noise path exists to avoid.
+    obstacle_margin_noise_std = (
+        noise_std if noise_injection == NoiseInjection.POSITION.value else 0.0
+    )
+    obstacles = _generate_radial_obstacles(
+        num_modes=num_modes, noise_std=obstacle_margin_noise_std
+    )
+    rejection_stats = _RejectionStats()
 
     for mode_index in range(num_modes):
         angle = 2.0 * np.pi * mode_index / num_modes
@@ -374,13 +544,15 @@ def _generate_radial(
             base_positions = _interpolate_waypoints(
                 waypoints=waypoints, num_points=trajectory_length
             )
-            positions = _sample_noisy_trajectory_no_collision(
-                base_trajectory=base_positions,
-                obstacles=obstacles,
+            positions, actions = _build_trajectory_signals(
+                trajectory=base_positions,
                 noise_std=noise_std,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                noise_injection=noise_injection,
                 random_generator=random_generator,
+                obstacles=obstacles,
+                rejection_stats=rejection_stats,
             )
-            actions = _compute_actions(positions)
             images = render_episode(
                 positions=positions,
                 obstacles=obstacles,
@@ -397,7 +569,9 @@ def _generate_radial(
                     "context": context,
                 }
             )
-    random_generator.shuffle(episodes)
+    rejection_stats.log_summary(
+        task_name=SyntheticTaskName.RADIAL.value, noise_std=noise_std
+    )
     return episodes
 
 
@@ -410,6 +584,8 @@ def _generate_corridor_navigation(
     trajectory_length: int,
     noise_std: float,
     mode_weights: list[float] | None,
+    noise_smoothing_sigma: float = 0.0,
+    noise_injection: str = NoiseInjection.POSITION.value,
 ) -> list[dict[str, np.ndarray]]:
     """Navigate through one of K gaps in a vertical wall, with S style variations.
 
@@ -434,6 +610,7 @@ def _generate_corridor_navigation(
     )
     gap_centers = _compute_corridor_gap_centers(num_gaps=num_modes)
     obstacles = _generate_corridor_obstacles(gap_centers=gap_centers)
+    rejection_stats = _RejectionStats()
 
     for gap_index in range(num_modes):
         gap_y = gap_centers[gap_index]
@@ -457,13 +634,15 @@ def _generate_corridor_navigation(
                         num_styles=num_styles,
                         gap_height=_compute_corridor_gap_height(num_gaps=num_modes),
                     )
-                positions = _sample_noisy_trajectory_no_collision(
-                    base_trajectory=base_positions,
-                    obstacles=obstacles,
+                positions, actions = _build_trajectory_signals(
+                    trajectory=base_positions,
                     noise_std=noise_std,
+                    noise_smoothing_sigma=noise_smoothing_sigma,
+                    noise_injection=noise_injection,
                     random_generator=random_generator,
+                    obstacles=obstacles,
+                    rejection_stats=rejection_stats,
                 )
-                actions = _compute_actions(positions)
                 images = render_episode(
                     positions=positions,
                     obstacles=obstacles,
@@ -482,7 +661,9 @@ def _generate_corridor_navigation(
                         "context": context,
                     }
                 )
-    random_generator.shuffle(episodes)
+    rejection_stats.log_summary(
+        task_name=SyntheticTaskName.CORRIDOR_NAVIGATION.value, noise_std=noise_std
+    )
     return episodes
 
 
@@ -693,10 +874,215 @@ def _interpolate_waypoints(
     return np.stack([interpolated_x, interpolated_y], axis=-1).astype(np.float32)
 
 
+def _gaussian_kernel_1d(smoothing_sigma: float) -> np.ndarray:
+    """Build a normalized 1-D Gaussian smoothing kernel.
+
+    Args:
+        smoothing_sigma: Standard deviation of the kernel, in timesteps.
+
+    Returns:
+        Kernel of shape (2 * radius + 1,) summing to 1, dtype float64.
+    """
+    radius = max(1, int(GAUSSIAN_KERNEL_TRUNCATE * smoothing_sigma + 0.5))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (offsets / smoothing_sigma) ** 2)
+    return kernel / kernel.sum()
+
+
+def _sample_position_noise(
+    shape: tuple[int, ...],
+    noise_std: float,
+    smoothing_sigma: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Sample position noise with a controllable temporal frequency band.
+
+    Actions are position differences, so a first difference -- a high-pass
+    filter -- is applied to this noise downstream. With ``smoothing_sigma = 0``
+    the noise is i.i.d. across timesteps and the resulting *action* noise has
+    power spectrum proportional to ``4 sin^2(pi f / f_s)``, concentrated at the
+    Nyquist frequency. Smoothing the position noise first multiplies that
+    spectrum by the kernel response, moving action-noise energy to lower
+    frequencies.
+
+    The white-noise amplitude is rescaled so the variance of the resulting
+    action noise is ``2 * noise_std ** 2`` regardless of ``smoothing_sigma``.
+    Both bands therefore inject the same action-noise power and differ only in
+    spectral shape, which is what makes a high-band/low-band comparison
+    controlled. The identity used is
+    ``Var(eta_{t+1} - eta_t) = 2 * white_std ** 2 * (r0 - r1)`` for
+    ``eta = kernel * white``, ``r0 = sum(k^2)``, ``r1 = sum(k_i k_{i+1})``.
+
+    Args:
+        shape: Noise shape as (num_steps, num_dims).
+        noise_std: Position-noise scale. Equals the i.i.d. standard deviation
+            when ``smoothing_sigma`` is 0.
+        smoothing_sigma: Gaussian smoothing width in timesteps. 0 disables
+            smoothing and reproduces i.i.d. noise exactly.
+        random_generator: NumPy random generator for reproducibility.
+
+    Returns:
+        Position noise of shape ``shape``, dtype float64.
+    """
+    if smoothing_sigma <= 0.0:
+        return random_generator.normal(0.0, noise_std, size=shape)
+
+    num_steps, num_dims = shape
+    kernel = _gaussian_kernel_1d(smoothing_sigma=smoothing_sigma)
+    radius = (kernel.size - 1) // 2
+    autocorrelation_gap = float(kernel @ kernel) - float(kernel[:-1] @ kernel[1:])
+    white_std = noise_std / np.sqrt(autocorrelation_gap)
+    # Convolve in "valid" mode over a padded white sequence so every output
+    # sample has identical statistics (no boundary variance artifacts).
+    white = random_generator.normal(
+        0.0, white_std, size=(num_steps + 2 * radius, num_dims)
+    )
+    smoothed = np.empty(shape, dtype=np.float64)
+    for dim in range(num_dims):
+        smoothed[:, dim] = np.convolve(white[:, dim], kernel, mode="valid")
+    return smoothed
+
+
+def _sample_action_noise(
+    shape: tuple[int, ...],
+    noise_std: float,
+    smoothing_sigma: float,
+    random_generator: np.random.Generator,
+) -> np.ndarray:
+    """Sample band-shaped noise to add directly to action labels.
+
+    Unlike :func:`_sample_position_noise`, this noise is not differenced
+    downstream, so the band shaping is applied here and the result is scaled to
+    a fixed root-mean-square. Both bands target standard deviation
+    ``sqrt(2) * noise_std`` before the caller zeroes the terminal sentinel step
+    (see :func:`_build_trajectory_signals`), which makes the realized RMS over
+    the full array slightly below that target; the two injection points are
+    otherwise directly comparable on one sigma grid.
+
+    ``smoothing_sigma = 0`` applies a first difference **with periodic (wrap-
+    around) boundaries** via ``np.roll``, reproducing the ``4 sin^2(pi f / f_s)``
+    spectrum the position path induces (high band) at the cost of an artificial
+    correlation between the first and last step. A positive value applies
+    Gaussian smoothing instead, also wrapped, moving the energy to low
+    frequencies. Because the scaling to the target root-mean-square happens
+    after shaping, the two bands carry identical power by construction, with no
+    correction factor and no effect on positions, images or clamping.
+
+    Both the draw and the shaping wrap around the episode, so exactly
+    ``num_steps * num_dims`` samples are consumed at every noise level and in
+    every band. This keeps the RNG state after sampling independent of band or
+    sigma, but shuffling is a separate, independently-seeded step (see
+    :func:`generate_task_episodes`) precisely so this draw-size invariant is not
+    the only thing standing between a noisy store and its zero-noise reference.
+
+    Args:
+        shape: Noise shape as (num_steps, num_dims).
+        noise_std: Position-path noise scale this action noise matches.
+        smoothing_sigma: Gaussian smoothing width in timesteps. 0 selects the
+            high band.
+        random_generator: NumPy random generator for reproducibility.
+
+    Returns:
+        Action noise of shape ``shape``, dtype float64.
+    """
+    target_std = math.sqrt(2.0) * noise_std
+    white = random_generator.normal(0.0, 1.0, size=shape)
+    if smoothing_sigma <= 0.0:
+        shaped = white - np.roll(white, shift=1, axis=0)
+        shaped_std = math.sqrt(2.0)
+    else:
+        kernel = _gaussian_kernel_1d(smoothing_sigma=smoothing_sigma)
+        radius = (kernel.size - 1) // 2
+        shaped = np.zeros(shape, dtype=np.float64)
+        for tap, weight in enumerate(kernel):
+            shaped += weight * np.roll(white, shift=radius - tap, axis=0)
+        shaped_std = math.sqrt(float(kernel @ kernel))
+    # Analytic rather than sample standard deviation: smoothing leaves only
+    # num_steps / smoothing_sigma effectively independent samples per episode, so
+    # dividing by the sample estimate biases the delivered power upwards.
+    return shaped * (target_std / shaped_std)
+
+
+def _build_trajectory_signals(
+    trajectory: np.ndarray,
+    noise_std: float,
+    noise_smoothing_sigma: float,
+    noise_injection: str,
+    random_generator: np.random.Generator,
+    obstacles: list[tuple[float, float, float, float]] | None = None,
+    rejection_stats: _RejectionStats | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build the positions and actions of one episode at the chosen noise point.
+
+    Args:
+        trajectory: Deterministic Cartesian path, shape (num_steps, 2).
+        noise_std: Noise scale, interpreted per ``noise_injection``.
+        noise_smoothing_sigma: Gaussian temporal smoothing width in timesteps
+            selecting the noise band; 0 is the high band.
+        noise_injection: ``NoiseInjection`` value choosing the injection point.
+        random_generator: NumPy random generator for reproducibility.
+        obstacles: Rectangles a position-noise trajectory must avoid. None
+            skips rejection sampling.
+        rejection_stats: Optional accumulator for rejection-sampling attempts.
+
+    Returns:
+        Positions clamped to the unit square and their action labels.
+
+    Raises:
+        ValueError: If ``noise_injection`` is not a known injection point.
+    """
+    if noise_injection == NoiseInjection.POSITION.value:
+        if obstacles is None:
+            positions = _add_noise_and_clamp(
+                trajectory=trajectory,
+                noise_std=noise_std,
+                random_generator=random_generator,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+            )
+        else:
+            positions = _sample_noisy_trajectory_no_collision(
+                base_trajectory=trajectory,
+                obstacles=obstacles,
+                noise_std=noise_std,
+                random_generator=random_generator,
+                noise_smoothing_sigma=noise_smoothing_sigma,
+                rejection_stats=rejection_stats,
+            )
+        return positions, _compute_actions(positions)
+
+    if noise_injection != NoiseInjection.ACTION.value:
+        raise ValueError(
+            f"Unknown noise_injection '{noise_injection}'. Expected one of "
+            f"{[member.value for member in NoiseInjection]}."
+        )
+
+    # Positions, and therefore the rendered images and the obstacle geometry,
+    # stay exactly as the deterministic task defines them; only the labels move.
+    positions = np.clip(trajectory, 0.0, 1.0).astype(np.float32)
+    noise = _sample_action_noise(
+        shape=positions.shape,
+        noise_std=noise_std,
+        smoothing_sigma=noise_smoothing_sigma,
+        random_generator=random_generator,
+    ).astype(np.float32)
+    # The final action is a zero sentinel, not a command: there is no position
+    # after the last one to difference against. The position path leaves it at
+    # zero because the noise reaches actions through that difference, so leaving
+    # it noise-free here keeps the two injection points comparable and stops the
+    # continuous arms -- whose horizon includes this step -- from being handed a
+    # random terminal move the tokenized arms never see.
+    noise[-1] = 0.0
+    actions = _compute_actions(positions) + noise
+    if rejection_stats is not None:
+        rejection_stats.record(attempts=1)
+    return positions, actions
+
+
 def _add_noise_and_clamp(
     trajectory: np.ndarray,
     noise_std: float,
     random_generator: np.random.Generator,
+    noise_smoothing_sigma: float = 0.0,
 ) -> np.ndarray:
     """Add isotropic Gaussian noise and clamp to [0, 1].
 
@@ -704,13 +1090,21 @@ def _add_noise_and_clamp(
         trajectory: Cartesian positions (x, y) of shape (num_steps, 2).
         noise_std: Standard deviation of the additive Gaussian noise.
         random_generator: NumPy random generator for reproducibility.
+        noise_smoothing_sigma: Gaussian temporal smoothing width, in
+            timesteps, applied to the noise before it is added. 0 keeps the
+            i.i.d. (high-frequency) default; larger values shift the induced
+            action noise to lower frequencies at matched power. See
+            :func:`_sample_position_noise`.
 
     Returns:
         Noisy positions clamped to [0, 1], shape (num_steps, 2), float32.
     """
-    noise = random_generator.normal(0.0, noise_std, size=trajectory.shape).astype(
-        np.float32
-    )
+    noise = _sample_position_noise(
+        shape=trajectory.shape,
+        noise_std=noise_std,
+        smoothing_sigma=noise_smoothing_sigma,
+        random_generator=random_generator,
+    ).astype(np.float32)
     noisy_trajectory = trajectory + noise
     return np.clip(noisy_trajectory, 0.0, 1.0)
 
@@ -733,14 +1127,26 @@ def _sample_noisy_trajectory_no_collision(
     obstacles: list[tuple[float, float, float, float]],
     noise_std: float,
     random_generator: np.random.Generator,
+    noise_smoothing_sigma: float = 0.0,
+    rejection_stats: _RejectionStats | None = None,
 ) -> np.ndarray:
     """Sample noise until the resulting trajectory does not collide.
+
+    Rejection sampling conditions the noise on being collision-free, which
+    truncates the injected noise distribution. The truncation grows with
+    ``noise_std``, so noise-sweep experiments must track how often it fires --
+    otherwise a sweep can silently flatten because high-noise cells only keep
+    their luckiest, least-noisy trajectories. Pass ``rejection_stats`` to
+    record that.
 
     Args:
         base_trajectory: Deterministic Cartesian path, shape (num_steps, 2).
         obstacles: Axis-aligned (x_min, y_min, x_max, y_max) rectangles.
         noise_std: Gaussian noise standard deviation.
         random_generator: NumPy random generator for reproducibility.
+        noise_smoothing_sigma: Gaussian temporal smoothing width for the
+            injected noise, in timesteps. See :func:`_sample_position_noise`.
+        rejection_stats: Optional accumulator recording attempts per episode.
 
     Returns:
         Noisy trajectory that does not collide with any obstacle.
@@ -750,17 +1156,21 @@ def _sample_noisy_trajectory_no_collision(
             MAX_TRAJECTORY_RETRIES attempts (indicates obstacle geometry
             is too tight for the given noise level).
     """
-    for _ in range(MAX_TRAJECTORY_RETRIES):
+    for attempt in range(MAX_TRAJECTORY_RETRIES):
         candidate = _add_noise_and_clamp(
             trajectory=base_trajectory,
             noise_std=noise_std,
             random_generator=random_generator,
+            noise_smoothing_sigma=noise_smoothing_sigma,
         )
         if not _trajectory_collides(trajectory=candidate, obstacles=obstacles):
+            if rejection_stats is not None:
+                rejection_stats.record(attempts=attempt + 1)
             return candidate
     raise RuntimeError(
         f"Failed to generate a collision-free trajectory after "
-        f"{MAX_TRAJECTORY_RETRIES} attempts (obstacle geometry too tight)."
+        f"{MAX_TRAJECTORY_RETRIES} attempts (obstacle geometry too tight "
+        f"for noise_std={noise_std})."
     )
 
 

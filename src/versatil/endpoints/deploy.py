@@ -98,9 +98,7 @@ def main(config: DictConfig) -> None:
     if config.token_usage_output is not None:
         token_usage_sink = RolloutTokenSink(output_path=config.token_usage_output)
         policy_runtime.policy.set_token_usage_sink(sink=token_usage_sink)
-        logging.info(
-            f"Capturing rollout action tokens to {config.token_usage_output}"
-        )
+        logging.info(f"Capturing rollout action tokens to {config.token_usage_output}")
 
     observation_transport = SocketObservationTransport(
         server_address=config.client.model_server_address,

@@ -173,9 +173,7 @@ class DiscreteDecoder(ActionDecoder):
         action_tokenizer: ActionTokenizer,
     ) -> bool:
         """Return whether inference should generate a known action-token count."""
-        return isinstance(
-            action_tokenizer.action_discretizer, BinnedActionDiscretizer
-        )
+        return isinstance(action_tokenizer.action_discretizer, BinnedActionDiscretizer)
 
     def _get_action_payload_token_count(self) -> int | None:
         """Return the required action-token count before any optional EOS.

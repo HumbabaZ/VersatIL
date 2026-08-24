@@ -15,7 +15,7 @@ from versatil.data.preprocessing.create_zarr_from_synthetic import (
     create_replay_buffer_from_synthetic,
 )
 from versatil.data.raw.schemas.custom.synthetic import SyntheticSchema
-from versatil.data.synthetic.constants import SyntheticTaskName
+from versatil.data.synthetic.constants import NoiseInjection, SyntheticTaskName
 
 
 def _default_zarr_array_specs(image_size: int) -> dict[str, dict]:
@@ -103,6 +103,8 @@ def mock_schema_factory(tmp_path: Path) -> Callable[..., MagicMock]:
         num_styles: int = 4,
         mode_weights: list[float] | None = None,
         zarr_array_specs: dict[str, dict] | None = None,
+        noise_smoothing_sigma: float = 0.0,
+        noise_injection: str = NoiseInjection.POSITION.value,
     ) -> MagicMock:
         schema = MagicMock(spec=SyntheticSchema)
         schema.zarr_path = str(tmp_path / "test.zarr")
@@ -115,6 +117,8 @@ def mock_schema_factory(tmp_path: Path) -> Callable[..., MagicMock]:
         schema.noise_std = noise_std
         schema.num_styles = num_styles
         schema.mode_weights = mode_weights
+        schema.noise_smoothing_sigma = noise_smoothing_sigma
+        schema.noise_injection = noise_injection
         schema.get_zarr_array_specs.return_value = (
             zarr_array_specs
             if zarr_array_specs is not None

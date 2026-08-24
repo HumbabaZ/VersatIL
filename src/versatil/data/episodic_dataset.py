@@ -288,6 +288,7 @@ class EpisodicDataset(data.Dataset):
         min_kinematics_std: float = 2e-2,
         min_kinematics_range: float = 4e-2,
         action_sample_size: int = 2048,
+        normalizer_state_path: str | None = None,
     ) -> tuple[LinearNormalizer, Tokenizer | None]:
         """Get normalizer and optionally tokenizer for this dataset.
 
@@ -304,6 +305,9 @@ class EpisodicDataset(data.Dataset):
             action_sample_size: Number of action chunk windows to stash on the
                 normalizer per action key for downstream data-aware
                 initialization. Set to 0 to disable.
+            normalizer_state_path: Optional path to a saved normalizer
+                state dict that replaces the fitted statistics before the
+                tokenizer is built. None refits on this dataset.
 
         Returns:
             Tuple of (normalizer, tokenizer) where tokenizer is None if not configured
@@ -328,6 +332,7 @@ class EpisodicDataset(data.Dataset):
             min_kinematics_std=min_kinematics_std,
             min_kinematics_range=min_kinematics_range,
             action_sample_size=action_sample_size,
+            normalizer_state_path=normalizer_state_path,
             episode_selection_mask=self.episode_selection_mask,
             seed=self.seed,
         )

@@ -50,6 +50,8 @@ def create_replay_buffer_from_synthetic(schema: SyntheticSchema) -> None:
         noise_std=schema.noise_std,
         num_styles=schema.num_styles,
         mode_weights=schema.mode_weights,
+        noise_smoothing_sigma=schema.noise_smoothing_sigma,
+        noise_injection=schema.noise_injection,
     )
     episode_ends = []
     cumulative_length = 0

@@ -15,6 +15,21 @@ class SyntheticTaskName(enum.StrEnum):
     CORRIDOR_NAVIGATION = "corridor_navigation"
 
 
+class NoiseInjection(enum.StrEnum):
+    """Where demonstration noise enters the generated episode.
+
+    ``POSITION`` perturbs the trajectory, so the noise reaches the actions
+    through the position difference and also changes the rendered images, the
+    clamping to the unit square and, on rejection-sampled tasks, which
+    trajectories survive. ``ACTION`` leaves positions and images untouched and
+    perturbs only the action labels, which isolates action-representation
+    robustness to label noise from those trajectory-level effects.
+    """
+
+    POSITION = "position"
+    ACTION = "action"
+
+
 DEFAULT_IMAGE_SIZE = 64
 DEFAULT_SEED = 42
 DEFAULT_NUM_EPISODES = 1000
@@ -24,6 +39,13 @@ MULTIPATH_DEFAULT_TRAJECTORY_LENGTH = 60
 MULTIPATH_DEFAULT_NOISE_STD = 0.008
 
 MAX_TRAJECTORY_RETRIES = 50
+
+# Gaussian smoothing kernels are truncated at this many standard deviations.
+GAUSSIAN_KERNEL_TRUNCATE = 4.0
+
+# Rejection-sampled tasks warn once the mean attempts per episode exceed this,
+# because heavy rejection truncates the injected noise distribution.
+REJECTION_ATTEMPTS_WARN_THRESHOLD = 1.5
 
 # Task 1 & 2: Circle / Conditional Circle
 

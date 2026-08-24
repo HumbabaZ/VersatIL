@@ -14,7 +14,7 @@ from versatil.data.constants import (
 )
 from versatil.data.raw.schemas.base import DatasetSchema
 from versatil.data.raw.zarr_meta import DatasetMetadata
-from versatil.data.synthetic.constants import SyntheticTaskName
+from versatil.data.synthetic.constants import NoiseInjection, SyntheticTaskName
 from versatil.training.callbacks.synthetic_rollout import SyntheticRolloutCallback
 
 ALLOWED_CAMERAS = {Cameras.AGENTVIEW.value}
@@ -49,6 +49,9 @@ class SyntheticSchema(DatasetSchema):
         num_styles: int = 1,
         mode_weights: list[float] | None = None,
         num_rollouts: int = 200,
+        noise_smoothing_sigma: float = 0.0,
+        noise_injection: str = NoiseInjection.POSITION.value,
+        eval_reference_noise_std: float | None = None,
     ):
         """Initialize and validate the synthetic benchmark schema.
 
@@ -66,11 +69,36 @@ class SyntheticSchema(DatasetSchema):
             num_styles: Number of sinusoidal style variations per corridor.
             mode_weights: Per-mode sampling weights. None for uniform.
             num_rollouts: Rollouts per evaluation in the training callback.
+            noise_smoothing_sigma: Gaussian temporal smoothing width, in
+                timesteps, applied to the injected position noise. 0 keeps
+                the i.i.d. default, whose first difference makes the action
+                noise high-frequency; larger values move that action noise
+                to lower frequencies at matched power, which supports
+                controlled noise-band robustness studies.
+            noise_injection: ``NoiseInjection`` value choosing where noise
+                enters. ``position`` perturbs the trajectory, so images,
+                clamping and rejection sampling move with it. ``action``
+                keeps positions and images clean and perturbs only the action
+                labels, isolating label-noise robustness.
+            eval_reference_noise_std: Noise level for the expert reference
+                episodes the rollout callback scores against. ``None``
+                (default) reuses ``noise_std``. Pin it when sweeping
+                ``noise_std``: the reference sets the mode centroids, the
+                endpoint-reach threshold and the obstacle layout, so
+                letting it track the training noise would loosen the
+                success criterion exactly where performance should drop.
         """
         if dataset_type != DatasetType.SYNTHETIC.value:
             raise ValueError(
                 f"SyntheticSchema only supports dataset_type='{DatasetType.SYNTHETIC.value}', "
                 f"got '{dataset_type}'"
+            )
+        valid_injections = [member.value for member in NoiseInjection]
+        if noise_injection not in valid_injections:
+            raise ValueError(
+                f"Unknown noise_injection '{noise_injection}'. Expected one of "
+                f"{valid_injections}. Failing here rather than at generation "
+                "time catches a typo before a sweep spends compute on it."
             )
         self.task_name = task_name
         self.num_episodes = num_episodes
@@ -82,6 +110,9 @@ class SyntheticSchema(DatasetSchema):
         self.num_styles = num_styles
         self.mode_weights = mode_weights
         self.num_rollouts = num_rollouts
+        self.noise_smoothing_sigma = noise_smoothing_sigma
+        self.noise_injection = noise_injection
+        self.eval_reference_noise_std = eval_reference_noise_std
         self._validate_metadata(metadata)
         super().__init__(
             zarr_path=zarr_path,
@@ -142,7 +173,11 @@ class SyntheticSchema(DatasetSchema):
                 num_modes=self.num_modes,
                 num_styles=self.num_styles,
                 trajectory_length=self.trajectory_length,
-                noise_std=self.noise_std,
+                noise_std=(
+                    self.noise_std
+                    if self.eval_reference_noise_std is None
+                    else self.eval_reference_noise_std
+                ),
                 num_rollouts=self.num_rollouts,
                 image_size=self.image_size,
                 log_every_n_epochs=experiment_config.val_every,

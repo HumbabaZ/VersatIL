@@ -285,9 +285,7 @@ class ActionTokenizer:
             raise RuntimeError("Tokenizer must be fitted or loaded before mapping")
         token_ids_array = self._to_numpy_tokens(tokens)
         if token_ids_array.ndim != 1:
-            raise ValueError(
-                f"Expected 1D tokens, got shape {token_ids_array.shape}"
-            )
+            raise ValueError(f"Expected 1D tokens, got shape {token_ids_array.shape}")
         return self._strip_and_unmap_tokens(token_ids_array)
 
     def to(self, device: torch.device) -> "ActionTokenizer":
