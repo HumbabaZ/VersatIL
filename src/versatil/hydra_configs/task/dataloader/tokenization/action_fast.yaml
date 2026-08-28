@@ -1,3 +1,12 @@
+# max_token_len is NOT a universal safe cap: FAST's post-BPE length grows with
+# the rounding scale, so a large scale can emit more tokens than there are
+# pre-BPE coefficients (calibration measured 161 tokens at scale 186). This
+# shared default (64) preserves the sequence length existing FAST runs train
+# with; a sweep that raises the scale must override max_token_len to fit its
+# own grid rather than change it here, since the value fixes the padded action
+# sequence length for every run sharing this config. scale/vocab_size null
+# means "use the processor's own default"; set them to fit a local FAST
+# processor with a specific rounding scale / BPE vocabulary size instead.
 defaults:
   - base
 
@@ -7,6 +16,8 @@ action_tokenizer:
   action_discretizer:
     type: ${action_discretizer:FAST}
     use_pretrained: false
+    scale: null
+    vocab_size: null
   token_id_mapping:
     type: ${action_token_id_mapping:IDENTITY}
   max_token_len: 64

@@ -75,6 +75,21 @@ class TestActionTokenizationConfig:
         )
         assert config.action_discretizer.tokenizer_model == tokenizer_model
 
+    def test_fast_scale_and_vocab_size_default_to_none(self):
+        config = ActionDiscretizerConfig()
+        assert config.scale is None
+        assert config.vocab_size is None
+
+    @pytest.mark.parametrize(("scale", "vocab_size"), [(25.0, 512), (1.0, 1024)])
+    def test_stores_fast_scale_and_vocab_size(self, scale, vocab_size):
+        config = ActionDiscretizerConfig(
+            type=ActionDiscretizerType.FAST.value,
+            scale=scale,
+            vocab_size=vocab_size,
+        )
+        assert config.scale == scale
+        assert config.vocab_size == vocab_size
+
     @pytest.mark.parametrize("num_bins", [64, 256])
     def test_stores_binned_action_discretizer(self, num_bins):
         config = ActionTokenizationConfig(

@@ -84,6 +84,8 @@ class FastActionDiscretizer(ActionDiscretizer):
         tokenizer_model: str = "physical-intelligence/fast",
         time_horizon: int | None = None,
         action_dim: int | None = None,
+        scale: float | None = None,
+        vocab_size: int | None = None,
     ):
         """Initialize FAST processor metadata and optional pretrained assets.
 
@@ -96,10 +98,20 @@ class FastActionDiscretizer(ActionDiscretizer):
                 fit overwrites it for local processors.
             action_dim: Action dimension used to shape decoded actions, with
                 the same semantics as ``time_horizon``.
+            scale: DCT rounding scale passed to the local processor fit.
+                Ignored for pretrained processors and when None, in which
+                case the processor's own default scale applies.
+            vocab_size: BPE vocabulary size passed to the local processor
+                fit; also becomes ``token_count`` once fit runs. Ignored for
+                pretrained processors and when None, in which case the
+                processor's own default vocabulary size applies and
+                ``token_count`` keeps the fixed 1024 fallback.
         """
         self.use_pretrained = use_pretrained
         self.tokenizer_model = tokenizer_model
         self.processor: ProcessorMixin | None = load_fast_processor(tokenizer_model)
+        self.scale = scale
+        self.vocab_size = vocab_size
         self._token_count = 2048 if use_pretrained else 1024
         self._is_fitted = use_pretrained
         self.time_horizon = time_horizon
@@ -116,7 +128,13 @@ class FastActionDiscretizer(ActionDiscretizer):
         return self._is_fitted
 
     def fit(self, action_chunks: np.ndarray) -> None:
-        """Fit a local FAST processor on shape (num_chunks, time_horizon, action_dim)."""
+        """Fit a local FAST processor on shape (num_chunks, time_horizon, action_dim).
+
+        When ``scale``/``vocab_size`` were set at construction, they are
+        forwarded to the processor fit, moving the two FAST knobs the wrapper
+        otherwise hardcodes. When left None, the call is unchanged from the
+        processor's own defaults, preserving prior behavior exactly.
+        """
         if self.use_pretrained:
             raise ValueError(
                 "Cannot fit a pretrained FAST action discretizer. "
@@ -126,11 +144,19 @@ class FastActionDiscretizer(ActionDiscretizer):
             raise RuntimeError("FAST processor not initialized")
         self.time_horizon = action_chunks.shape[1]
         self.action_dim = action_chunks.shape[2]
+        fit_overrides: dict[str, float | int] = {}
+        if self.scale is not None:
+            fit_overrides["scale"] = self.scale
+        if self.vocab_size is not None:
+            fit_overrides["vocab_size"] = self.vocab_size
         self.processor = self.processor.fit(
             action_chunks,
             time_horizon=self.time_horizon,
             action_dim=self.action_dim,
+            **fit_overrides,
         )
+        if self.vocab_size is not None:
+            self._token_count = self.vocab_size
         self._is_fitted = True
 
     def encode(self, action_chunk: np.ndarray) -> list[int]:

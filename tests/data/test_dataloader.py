@@ -101,6 +101,8 @@ def mock_hydra_config_factory() -> Callable[..., MagicMock]:
         has_gripper_actions: bool = False,
         use_gripper_class_weights: bool = False,
         downsample_factor: int = 1,
+        seed: int = 42,
+        data_seed: int | None = None,
     ) -> MagicMock:
         dataloader_config = DataLoaderConfig(
             batch_size=batch_size,
@@ -126,7 +128,8 @@ def mock_hydra_config_factory() -> Callable[..., MagicMock]:
         config.task.dataloader = dataloader_config
         config.task.prediction_horizon = 4
         config.task.observation_horizon = 2
-        config.experiment.seed = 42
+        config.experiment.seed = seed
+        config.experiment.data_seed = data_seed
         return config
 
     return factory
@@ -721,6 +724,30 @@ class TestGetDataloaders:
         _, val_loader, _, _, _ = get_dataloaders(config=config)
 
         assert val_loader is None
+
+    def test_data_seed_falls_back_to_train_seed_when_none(
+        self, mock_hydra_config_factory
+    ):
+        config = mock_hydra_config_factory(val_ratio=0.2, seed=7, data_seed=None)
+
+        get_dataloaders(config=config)
+
+        train_call = self.mock_episodic_dataset.call_args_list[0]
+        val_call = self.mock_episodic_dataset.call_args_list[1]
+        assert train_call.kwargs["seed"] == 7
+        assert val_call.kwargs["seed"] == 7
+
+    def test_data_seed_overrides_train_seed_for_both_splits(
+        self, mock_hydra_config_factory
+    ):
+        config = mock_hydra_config_factory(val_ratio=0.2, seed=7, data_seed=99)
+
+        get_dataloaders(config=config)
+
+        train_call = self.mock_episodic_dataset.call_args_list[0]
+        val_call = self.mock_episodic_dataset.call_args_list[1]
+        assert train_call.kwargs["seed"] == 99
+        assert val_call.kwargs["seed"] == 99
 
     def test_normalizer_and_tokenizer_set_on_train_dataset(
         self, mock_hydra_config_factory

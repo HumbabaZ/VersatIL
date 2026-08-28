@@ -76,6 +76,81 @@ class TestBpeIdsToCoefficientTokens:
         )
 
 
+@pytest.fixture
+def fittable_fast_discretizer_factory():
+    """Factory for a local (fittable) FastActionDiscretizer with a mock processor."""
+
+    def factory(
+        scale: float | None = None,
+        vocab_size: int | None = None,
+    ) -> FastActionDiscretizer:
+        with patch(
+            "versatil.data.tokenization.action_discretizer.load_fast_processor"
+        ) as mock_loader:
+            processor = mock_loader.return_value
+            processor.fit.return_value = processor
+            discretizer = FastActionDiscretizer(
+                use_pretrained=False,
+                scale=scale,
+                vocab_size=vocab_size,
+            )
+        return discretizer
+
+    return factory
+
+
+class TestFastScaleVocabSizeForwarding:
+    def test_stores_scale_and_vocab_size(self, fittable_fast_discretizer_factory):
+        discretizer = fittable_fast_discretizer_factory(scale=25.0, vocab_size=512)
+
+        assert discretizer.scale == 25.0
+        assert discretizer.vocab_size == 512
+
+    def test_fit_forwards_scale_and_vocab_size_when_set(
+        self, fittable_fast_discretizer_factory
+    ):
+        discretizer = fittable_fast_discretizer_factory(scale=25.0, vocab_size=512)
+        action_chunks = np.zeros((4, 3, 2), dtype=np.float32)
+
+        discretizer.fit(action_chunks)
+
+        discretizer.processor.fit.assert_called_once_with(
+            action_chunks,
+            time_horizon=3,
+            action_dim=2,
+            scale=25.0,
+            vocab_size=512,
+        )
+
+    def test_fit_omits_knobs_when_none(self, fittable_fast_discretizer_factory):
+        discretizer = fittable_fast_discretizer_factory(scale=None, vocab_size=None)
+        action_chunks = np.zeros((4, 3, 2), dtype=np.float32)
+
+        discretizer.fit(action_chunks)
+
+        discretizer.processor.fit.assert_called_once_with(
+            action_chunks,
+            time_horizon=3,
+            action_dim=2,
+        )
+
+    def test_token_count_follows_vocab_size(self, fittable_fast_discretizer_factory):
+        discretizer = fittable_fast_discretizer_factory(scale=25.0, vocab_size=512)
+
+        discretizer.fit(np.zeros((4, 3, 2), dtype=np.float32))
+
+        assert discretizer.token_count == 512
+
+    def test_token_count_keeps_default_when_vocab_size_none(
+        self, fittable_fast_discretizer_factory
+    ):
+        discretizer = fittable_fast_discretizer_factory(scale=None, vocab_size=None)
+
+        discretizer.fit(np.zeros((4, 3, 2), dtype=np.float32))
+
+        assert discretizer.token_count == 1024
+
+
 class TestFastDecodeUsesCoefficientTokens:
     def test_decode_matches_inverse_dct_of_coefficient_tokens(
         self, fast_discretizer_factory

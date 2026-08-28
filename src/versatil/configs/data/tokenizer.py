@@ -65,6 +65,12 @@ class ActionDiscretizerConfig:
             IDs.
         use_pretrained: FAST-specific options.
         tokenizer_model: FAST tokenizer model identifier.
+        scale: FAST DCT rounding scale passed to a local processor fit. Ignored
+            for pretrained processors and when None, in which case the
+            processor's own default scale applies.
+        vocab_size: FAST BPE vocabulary size passed to a local processor fit.
+            Ignored for pretrained processors and when None, in which case
+            the processor's own default vocabulary size applies.
         num_bins: Binned discretizer options. Uniform binning places equal-width bins
             over [min_value, max_value]; quantile binning adapts edges to the action
             distribution and ignores the range bounds.
@@ -78,6 +84,8 @@ class ActionDiscretizerConfig:
     # FAST-specific options.
     use_pretrained: bool = True
     tokenizer_model: str = "physical-intelligence/fast"
+    scale: float | None = None
+    vocab_size: int | None = None
     # Binned discretizer options. Uniform binning places equal-width bins
     # over [min_value, max_value]; quantile binning adapts edges to the
     # action distribution and ignores the range bounds.

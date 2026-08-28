@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -62,6 +63,8 @@ def _build_action_discretizer(
                 tokenizer_model=config.tokenizer_model,
                 time_horizon=time_horizon,
                 action_dim=action_dim,
+                scale=config.scale,
+                vocab_size=config.vocab_size,
             )
         case ActionDiscretizerType.BINNED.value:
             return BinnedActionDiscretizer(
@@ -116,6 +119,7 @@ class TransformBuilder:
         action_sample_size: int = 2048,
         episode_selection_mask: np.ndarray | None = None,
         seed: int = 42,
+        normalizer_state_path: str | Path | None = None,
     ):
         """Initialize transform builder.
 
@@ -165,6 +169,7 @@ class TransformBuilder:
         self.min_kinematics_std = min_kinematics_std
         self.min_kinematics_range = min_kinematics_range
         self.action_sample_size = action_sample_size
+        self.normalizer_state_path = normalizer_state_path
         self._random_generator = np.random.default_rng(seed)
 
     def _build_selected_step_mask(self) -> np.ndarray | None:
@@ -255,6 +260,7 @@ class TransformBuilder:
             action_meta=action_meta,
             device=device,
         )
+        self._apply_normalizer_state_override(normalizer=normalizer, device=device)
         chunk_action_keys = [
             key for key, meta in action_meta.items() if meta.needs_normalization
         ]
@@ -291,6 +297,47 @@ class TransformBuilder:
                 device=device,
             )
         return normalizer, tokenizer
+
+    def _apply_normalizer_state_override(
+        self,
+        normalizer: LinearNormalizer,
+        device: torch.device | None = None,
+    ) -> None:
+        """Replace fitted statistics with a stored normalizer state, in place.
+
+        Applied immediately after fitting and before the action tokenizer is
+        built, because the tokenizer is fitted on normalized actions and would
+        otherwise be keyed to statistics the trained policy never sees.
+
+        Sharing one normalization across runs is what makes an action-space
+        perturbation sweep interpretable: refitting min-max statistics on
+        perturbed data widens the action range, which shrinks the fraction of
+        a fixed ``[-1, 1]`` support that the underlying signal occupies. A
+        discretizer with fixed bin edges then resolves the signal more coarsely
+        at higher perturbation levels, confounding the perturbation's effect
+        with a change in effective resolution -- and doing so asymmetrically,
+        since continuous action heads have no comparable term.
+
+        Args:
+            normalizer: Freshly fitted normalizer, mutated in place.
+            device: Target device for the loaded tensors.
+
+        Raises:
+            FileNotFoundError: If the configured state path does not exist.
+        """
+        if self.normalizer_state_path is None:
+            return
+        state_path = Path(self.normalizer_state_path)
+        if not state_path.is_file():
+            raise FileNotFoundError(
+                f"normalizer_state_path does not exist: {state_path}. Fit it "
+                f"first with `python -m versatil.endpoints.fit_normalizer`."
+            )
+        state_dict = torch.load(state_path, map_location=device or "cpu")
+        normalizer.load_state_dict(state_dict)
+        if device is not None:
+            normalizer.to(device)
+        logging.info(f"Loaded normalizer state from {state_path}")
 
     def _sample_chunk_start_indices(
         self,

@@ -71,6 +71,11 @@ def get_dataloaders(
         recreate_on_missing_keys=dataloader_config.recreate_zarr_on_missing_keys,
     )
     skip_validation = dataloader_config.val_ratio == 0
+    data_seed = (
+        config.experiment.data_seed
+        if config.experiment.data_seed is not None
+        else config.experiment.seed
+    )
 
     train_dataset = EpisodicDataset(
         zarr_path=schema.zarr_path,
@@ -78,7 +83,7 @@ def get_dataloaders(
         obs_horizon=config.task.observation_horizon,
         dataloader_config=dataloader_config,
         train=True,
-        seed=config.experiment.seed,
+        seed=data_seed,
         action_space=action_space,
         observation_space=observation_space,
     )
@@ -93,6 +98,7 @@ def get_dataloaders(
         min_kinematics_std=dataloader_config.min_kinematics_std,
         min_kinematics_range=dataloader_config.min_kinematics_range,
         action_sample_size=dataloader_config.action_sample_size,
+        normalizer_state_path=dataloader_config.normalizer_state_path,
         device=torch.device("cpu"),  # Keep on CPU for DataLoader workers
     )
     train_dataset.set_normalizer(normalizer)
@@ -118,7 +124,7 @@ def get_dataloaders(
             obs_horizon=config.task.observation_horizon,
             dataloader_config=dataloader_config,
             train=False,
-            seed=config.experiment.seed,
+            seed=data_seed,
             action_space=action_space,
             observation_space=observation_space,
             # Downsampling replaces the training buffer with a copy holding

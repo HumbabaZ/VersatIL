@@ -13,7 +13,15 @@ class ExperimentConfig:
 
     Attributes:
         name: Human-readable name.
-        seed: Random seed for reproducibility.
+        seed: Random seed for reproducibility, applied to model initialization,
+            training order, and (when data_seed is None) the train/val split,
+            normalizer fit, and tokenizer fit.
+        data_seed: Optional seed for the train/val split, normalizer fit, and
+            tokenizer fit, decoupled from model/training randomness. When
+            None, seed is used for both, matching prior behavior. Set this to
+            hold data/normalization/tokenizer identical across runs that vary
+            only seed, so seed-to-seed differences reflect training
+            randomness alone.
         checkpoint_folder: Root directory receiving run checkpoints.
         resume_from: Checkpoint path training resumes from, or null.
         use_wandb: Whether metrics are logged to Weights & Biases.
@@ -32,6 +40,7 @@ class ExperimentConfig:
 
     name: str = MISSING
     seed: int = 42
+    data_seed: int | None = None
     checkpoint_folder: str = MISSING
     resume_from: str | None = None
     use_wandb: bool = True
