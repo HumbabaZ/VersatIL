@@ -178,6 +178,7 @@ class SyntheticSchema(DatasetSchema):
                     if self.eval_reference_noise_std is None
                     else self.eval_reference_noise_std
                 ),
+                zarr_path=self.zarr_path,
                 num_rollouts=self.num_rollouts,
                 image_size=self.image_size,
                 log_every_n_epochs=experiment_config.val_every,

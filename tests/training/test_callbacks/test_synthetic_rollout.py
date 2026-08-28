@@ -19,6 +19,7 @@ def callback_factory() -> Callable[..., SyntheticRolloutCallback]:
         num_styles: int = 1,
         trajectory_length: int = 60,
         noise_std: float = 0.008,
+        zarr_path: str = "training_store.zarr",
         num_rollouts: int = 10,
         image_size: int = 32,
         log_every_n_epochs: int = 1,
@@ -29,6 +30,7 @@ def callback_factory() -> Callable[..., SyntheticRolloutCallback]:
             num_styles=num_styles,
             trajectory_length=trajectory_length,
             noise_std=noise_std,
+            zarr_path=zarr_path,
             num_rollouts=num_rollouts,
             image_size=image_size,
             log_every_n_epochs=log_every_n_epochs,
@@ -86,7 +88,18 @@ def _patch_callback_dependencies(
     fake_trajectories: np.ndarray,
     fake_results: dict,
 ):
-    """Context manager that patches run_rollouts, evaluate_rollouts, and figure helpers."""
+    """Patches run_rollouts, evaluate_rollouts, the figure helpers, and the buffer.
+
+    The buffer patch (index 5) stands in for the training store the training-data
+    plot reads; callers that pass ``logger=None`` skip that plot and need not
+    enter it.
+    """
+    fake_buffer = MagicMock()
+    fake_buffer.n_episodes = 1
+    fake_buffer.get_episode.return_value = {
+        "synthetic_position": np.zeros((10, 2)),
+        "synthetic_mode_id": np.zeros((10, 1)),
+    }
     return (
         patch(
             "versatil.training.callbacks.synthetic_rollout.run_rollouts",
@@ -102,6 +115,10 @@ def _patch_callback_dependencies(
         ),
         patch("versatil.training.callbacks.synthetic_rollout.plt.close"),
         patch("versatil.training.callbacks.synthetic_rollout.figure_to_wandb_image"),
+        patch(
+            "versatil.training.callbacks.synthetic_rollout.ReplayBuffer.create_from_path",
+            return_value=fake_buffer,
+        ),
     )
 
 
@@ -115,13 +132,16 @@ def test_stores_configuration(
 ):
     task_name = SyntheticTaskName.CORRIDOR_NAVIGATION.value
     log_every_n_epochs = 3
+    zarr_path = "corridor_training_store.zarr"
     callback = callback_factory(
         task_name=task_name,
+        zarr_path=zarr_path,
         num_rollouts=num_rollouts,
         image_size=image_size,
         log_every_n_epochs=log_every_n_epochs,
     )
     assert callback.task_name == task_name
+    assert callback.zarr_path == zarr_path
     assert callback.num_rollouts == num_rollouts
     assert callback.image_size == image_size
     assert callback.log_every_n_epochs == log_every_n_epochs
@@ -304,7 +324,107 @@ def test_calls_evaluate_rollouts_with_correct_args(
         num_styles=callback.num_styles,
         trajectory_length=callback.trajectory_length,
         noise_std=callback.noise_std,
+        expected_mode_ids=None,
     )
+
+
+@pytest.mark.unit
+def test_passes_requested_mode_per_rollout_for_conditional_task(
+    callback_factory: Callable[..., SyntheticRolloutCallback],
+    mock_trainer_factory: Callable[..., MagicMock],
+    mock_pl_module_factory: Callable[..., MagicMock],
+    fake_trajectories_factory: Callable[..., np.ndarray],
+    fake_results_factory: Callable[..., dict],
+):
+    num_rollouts = 10
+    num_modes = 2
+    callback = callback_factory(
+        task_name=SyntheticTaskName.CONDITIONAL_CIRCLE.value,
+        num_rollouts=num_rollouts,
+    )
+    trainer = mock_trainer_factory(logger=None)
+    pl_module = mock_pl_module_factory()
+    pl_module.policy.observation_space.observations_metadata = {
+        SyntheticObsKey.CONTEXT.value: MagicMock(),
+    }
+    fake_layout = MagicMock()
+    fake_layout.num_modes = num_modes
+
+    patches = _patch_callback_dependencies(
+        fake_trajectories=fake_trajectories_factory(num_rollouts=num_rollouts),
+        fake_results=fake_results_factory(),
+    )
+    with (
+        patches[0],
+        patches[1] as mock_eval,
+        patches[2],
+        patches[3],
+        patches[4],
+        patch(
+            "versatil.training.callbacks.synthetic_rollout.get_task_layout",
+            return_value=fake_layout,
+        ),
+    ):
+        callback.on_train_epoch_end(trainer=trainer, pl_module=pl_module)
+
+    eval_kwargs = mock_eval.call_args.kwargs
+    assert eval_kwargs["rollout_trajectories"].shape[0] == num_rollouts * num_modes
+    np.testing.assert_array_equal(
+        eval_kwargs["expected_mode_ids"],
+        np.concatenate(
+            [np.full(num_rollouts, mode, dtype=np.int64) for mode in range(num_modes)]
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("has_context_metrics", [True, False])
+def test_logs_context_metrics_only_when_evaluated(
+    callback_factory: Callable[..., SyntheticRolloutCallback],
+    mock_trainer_factory: Callable[..., MagicMock],
+    mock_pl_module_factory: Callable[..., MagicMock],
+    fake_trajectories_factory: Callable[..., np.ndarray],
+    fake_results_factory: Callable[..., dict],
+    caplog: pytest.LogCaptureFixture,
+    has_context_metrics: bool,
+):
+    callback = callback_factory()
+    trainer = mock_trainer_factory(current_epoch=3)
+    pl_module = mock_pl_module_factory()
+    fake_results = fake_results_factory()
+    if has_context_metrics:
+        fake_results["context_accuracy"] = 0.95
+        fake_results["conditional_success_rate"] = 0.8
+
+    patches = _patch_callback_dependencies(
+        fake_trajectories=fake_trajectories_factory(),
+        fake_results=fake_results,
+    )
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        caplog.at_level("INFO"),
+    ):
+        callback.on_train_epoch_end(trainer=trainer, pl_module=pl_module)
+
+    logged = trainer.logger.log_metrics.call_args.args[0]
+    rollout_line = next(
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Synthetic rollout:")
+    )
+    if has_context_metrics:
+        assert logged["synthetic/context_accuracy"] == 0.95
+        assert logged["synthetic/conditional_success_rate"] == 0.8
+        assert rollout_line.endswith("context_accuracy=0.95, conditional_success=0.80")
+    else:
+        assert "synthetic/context_accuracy" not in logged
+        assert "synthetic/conditional_success_rate" not in logged
+        assert "context_accuracy" not in rollout_line
 
 
 @pytest.mark.unit
@@ -351,7 +471,14 @@ def test_logs_coverage_metrics_to_wandb(
         fake_trajectories=fake_trajectories_factory(),
         fake_results=fake_results,
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+    ):
         callback.on_train_epoch_end(trainer=trainer, pl_module=pl_module)
 
     logged = trainer.logger.log_metrics.call_args.args[0]
@@ -376,6 +503,12 @@ def test_logs_trajectory_plot_as_wandb_image(
     trainer = mock_trainer_factory()
     pl_module = mock_pl_module_factory()
     mock_figure = MagicMock()
+    fake_buffer = MagicMock()
+    fake_buffer.n_episodes = 1
+    fake_buffer.get_episode.return_value = {
+        "synthetic_position": np.zeros((10, 2)),
+        "synthetic_mode_id": np.zeros((10, 1)),
+    }
 
     with (
         patch(
@@ -385,6 +518,10 @@ def test_logs_trajectory_plot_as_wandb_image(
         patch(
             "versatil.training.callbacks.synthetic_rollout.evaluate_rollouts",
             return_value=fake_results_factory(),
+        ),
+        patch(
+            "versatil.training.callbacks.synthetic_rollout.ReplayBuffer.create_from_path",
+            return_value=fake_buffer,
         ),
         patch(
             "versatil.training.callbacks.synthetic_rollout.plot_trajectories_2d",
@@ -518,6 +655,12 @@ def test_logs_training_data_on_first_epoch_only(
     callback = callback_factory()
     trainer = mock_trainer_factory(current_epoch=0)
     pl_module = mock_pl_module_factory()
+    fake_buffer = MagicMock()
+    fake_buffer.n_episodes = 1
+    fake_buffer.get_episode.return_value = {
+        "synthetic_position": np.zeros((10, 2)),
+        "synthetic_mode_id": np.zeros((10, 1)),
+    }
 
     with (
         patch(
@@ -529,11 +672,9 @@ def test_logs_training_data_on_first_epoch_only(
             return_value=fake_results_factory(),
         ),
         patch(
-            "versatil.training.callbacks.synthetic_rollout.generate_task_episodes",
-            return_value=[
-                {"position": np.zeros((10, 2)), "mode_id": np.zeros((10, 1))}
-            ],
-        ) as mock_generate,
+            "versatil.training.callbacks.synthetic_rollout.ReplayBuffer.create_from_path",
+            return_value=fake_buffer,
+        ) as mock_create,
         patch(
             "versatil.training.callbacks.synthetic_rollout.plot_trajectories_2d",
             return_value=MagicMock(),
@@ -542,13 +683,13 @@ def test_logs_training_data_on_first_epoch_only(
         patch("versatil.training.callbacks.synthetic_rollout.figure_to_wandb_image"),
     ):
         callback.on_train_epoch_end(trainer=trainer, pl_module=pl_module)
-        first_generate_count = mock_generate.call_count
+        first_read_count = mock_create.call_count
 
         callback.on_train_epoch_end(trainer=trainer, pl_module=pl_module)
-        second_generate_count = mock_generate.call_count
+        second_read_count = mock_create.call_count
 
-    assert first_generate_count == 1
-    assert second_generate_count == 1
+    assert first_read_count == 1
+    assert second_read_count == 1
 
 
 @pytest.mark.unit
@@ -562,6 +703,12 @@ def test_training_data_plot_receives_mode_ids_and_title(
     callback = callback_factory()
     trainer = mock_trainer_factory(current_epoch=0)
     pl_module = mock_pl_module_factory()
+    fake_buffer = MagicMock()
+    fake_buffer.n_episodes = 1
+    fake_buffer.get_episode.return_value = {
+        "synthetic_position": np.zeros((10, 2)),
+        "synthetic_mode_id": np.zeros((10, 1)),
+    }
 
     with (
         patch(
@@ -573,10 +720,8 @@ def test_training_data_plot_receives_mode_ids_and_title(
             return_value=fake_results_factory(),
         ),
         patch(
-            "versatil.training.callbacks.synthetic_rollout.generate_task_episodes",
-            return_value=[
-                {"position": np.zeros((10, 2)), "mode_id": np.zeros((10, 1))}
-            ],
+            "versatil.training.callbacks.synthetic_rollout.ReplayBuffer.create_from_path",
+            return_value=fake_buffer,
         ),
         patch(
             "versatil.training.callbacks.synthetic_rollout.plot_trajectories_2d",

@@ -9,8 +9,8 @@ import torch
 import wandb
 from pytorch_lightning.callbacks import Callback
 
-from versatil.data.constants import SyntheticObsKey
-from versatil.data.synthetic.generators import generate_task_episodes
+from versatil.data.constants import ProprioKey, SyntheticObsKey
+from versatil.data.preprocessing.replay_buffer import ReplayBuffer
 from versatil.data.synthetic.task_layout import get_task_layout
 from versatil.data.synthetic.visualization import plot_trajectories_2d
 from versatil.inference.synthetic_rollout import evaluate_rollouts, run_rollouts
@@ -24,7 +24,9 @@ class SyntheticRolloutCallback(Callback):
 
     Puts the policy in eval mode, generates trajectories via closed-loop
     rollout, computes mode coverage and goal success against regenerated
-    expert demonstrations, and logs metrics + trajectory plots to wandb.
+    expert demonstrations, and logs metrics + trajectory plots to wandb. The
+    training-data plot is read from the policy's own store so it shows the
+    actual injected noise rather than a clean regenerated reference.
 
     Args:
         task_name: SyntheticTaskName.value string.
@@ -34,7 +36,10 @@ class SyntheticRolloutCallback(Callback):
             by tasks that do not use styles.
         trajectory_length: Length of generated expert and rollout
             trajectories.
-        noise_std: Standard deviation of expert trajectory noise.
+        noise_std: Standard deviation of the noise used for the expert
+            reference the rollouts are scored against.
+        zarr_path: Store the policy trains on, read once to plot the actual
+            training demonstrations rather than a regenerated clean reference.
         num_rollouts: Number of rollout trajectories per evaluation.
         image_size: Side length for rendered observation images.
         log_every_n_epochs: Evaluate every N epochs.
@@ -47,6 +52,7 @@ class SyntheticRolloutCallback(Callback):
         num_styles: int,
         trajectory_length: int,
         noise_std: float,
+        zarr_path: str,
         num_rollouts: int = 50,
         image_size: int = 64,
         log_every_n_epochs: int = 1,
@@ -58,6 +64,7 @@ class SyntheticRolloutCallback(Callback):
         self.num_styles = num_styles
         self.trajectory_length = trajectory_length
         self.noise_std = noise_std
+        self.zarr_path = zarr_path
         self.num_rollouts = num_rollouts
         self.image_size = image_size
         self.log_every_n_epochs = log_every_n_epochs
@@ -106,6 +113,21 @@ class SyntheticRolloutCallback(Callback):
                 if len(per_mode_trajectories) == 1
                 else np.concatenate(per_mode_trajectories, axis=0)
             )
+            # Concatenation drops which context each batch was rolled out
+            # with, so rebuild that label here: without it success cannot tell
+            # a policy that follows the context from one that ignores it.
+            expected_mode_ids = (
+                None
+                if context_modes == [None]
+                else np.concatenate(
+                    [
+                        np.full(batch.shape[0], mode, dtype=np.int64)
+                        for mode, batch in zip(
+                            context_modes, per_mode_trajectories, strict=True
+                        )
+                    ]
+                )
+            )
 
             results = evaluate_rollouts(
                 rollout_trajectories=trajectories,
@@ -115,6 +137,7 @@ class SyntheticRolloutCallback(Callback):
                 num_styles=self.num_styles,
                 trajectory_length=self.trajectory_length,
                 noise_std=self.noise_std,
+                expected_mode_ids=expected_mode_ids,
             )
         except Exception:
             logging.warning(
@@ -149,6 +172,12 @@ class SyntheticRolloutCallback(Callback):
             f"raw_entropy={entropy_ratio:.2f}",
             f"per_mode={per_mode}",
         ]
+        has_context_metrics = "context_accuracy" in results
+        if has_context_metrics:
+            log_parts += [
+                f"context_accuracy={results['context_accuracy']:.2f}",
+                f"conditional_success={results['conditional_success_rate']:.2f}",
+            ]
         logging.info(f"Synthetic rollout: {', '.join(log_parts)}")
 
         if trainer.logger is not None:
@@ -162,6 +191,11 @@ class SyntheticRolloutCallback(Callback):
                 "synthetic/mode_coverage": mode_coverage,
                 "synthetic/mode_entropy_ratio": entropy_ratio,
             }
+            if has_context_metrics:
+                metrics["synthetic/context_accuracy"] = results["context_accuracy"]
+                metrics["synthetic/conditional_success_rate"] = results[
+                    "conditional_success_rate"
+                ]
             for mode_index, count in per_mode.items():
                 metrics[f"synthetic/mode_{mode_index}_count"] = count
 
@@ -204,23 +238,25 @@ class SyntheticRolloutCallback(Callback):
         return list(range(layout.num_modes))
 
     def _log_training_data(self, trainer: pl.Trainer) -> None:
-        """Log training data trajectories to wandb on the first epoch."""
-        episodes = generate_task_episodes(
-            task_name=self.task_name,
-            num_episodes=100,
-            seed=0,
-            image_size=self.image_size,
-            num_modes=self.num_modes,
-            trajectory_length=self.trajectory_length,
-            noise_std=self.noise_std,
-            num_styles=self.num_styles,
-        )
-        trajectories = np.array([episode["position"] for episode in episodes])
-        mode_ids = np.array([int(episode["mode_id"][0, 0]) for episode in episodes])
+        """Log the actual training demonstrations to wandb on the first epoch.
+
+        Reads the policy's own store so the plot shows the noise the model
+        trains on. Regenerating a reference here instead would draw a clean
+        trajectory whenever the reference noise is zero, hiding label- or
+        position-space corruption that is fully present in the training data.
+        """
+        buffer = ReplayBuffer.create_from_path(zarr_path=self.zarr_path)
+        num_to_plot = min(100, buffer.n_episodes)
+        trajectories = []
+        mode_ids = []
+        for episode_index in range(num_to_plot):
+            episode = buffer.get_episode(episode_index)
+            trajectories.append(episode[ProprioKey.SYNTHETIC_POSITION.value])
+            mode_ids.append(int(episode[SyntheticObsKey.MODE_ID.value][0, 0]))
         figure = plot_trajectories_2d(
-            trajectories=trajectories,
+            trajectories=np.stack(trajectories),
             task_name=self.task_name,
-            mode_ids=mode_ids,
+            mode_ids=np.array(mode_ids),
             title="Training Data",
             num_modes=self.num_modes,
             num_styles=self.num_styles,

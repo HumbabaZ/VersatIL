@@ -46,12 +46,35 @@ from versatil.data.preprocessing.create_zarr_from_synthetic import (
 from versatil.data.preprocessing.replay_buffer import ReplayBuffer
 from versatil.data.synthetic.constants import NoiseInjection
 
-# Noise is expressed as a multiple of each task's own default, because the two
-# tasks differ about threefold in action magnitude and a shared absolute sigma
-# would put them at very different signal-to-noise ratios.
-TASK_DEFAULT_NOISE_STD = {"sequential": 0.012, "radial": 0.006}
-TASK_SCHEMA_GROUP = {"sequential": "synthetic/sequential", "radial": "synthetic/radial"}
-SIGMA_MULTIPLIERS = (0.0, 0.5, 1.0, 2.0, 4.0)
+# Noise is expressed as a multiple of each task's own default, because the tasks
+# differ severalfold in action magnitude and a shared absolute sigma would put
+# them at very different signal-to-noise ratios.
+TASK_DEFAULT_NOISE_STD = {
+    "sequential": 0.012,
+    "radial": 0.006,
+    "corridor": 0.005,
+    "conditional": 0.008,
+}
+TASK_SCHEMA_GROUP = {
+    "sequential": "synthetic/sequential",
+    "radial": "synthetic/radial",
+    "corridor": "synthetic/corridor_navigation",
+    "conditional": "synthetic/conditional_circle",
+}
+# The conditional task feeds a one-hot context that selects the mode, so each
+# mode is unimodal given its context and a policy's success under noise measures
+# execution accuracy rather than whether it kept its modes. That needs the
+# context-aware configs, which add the context encoder and decoder input.
+CONDITIONAL_TASK = "conditional"
+# The grid anchors at 1.0, the benchmark's own default noise, and steps up from
+# there. Zero noise is excluded on purpose: with the benchmark's single style and
+# fixed start, noise_std is the only source of episode-to-episode variation, so
+# under action-label injection a sigma of 0 collapses the dataset to a handful of
+# identical demonstrations -- a categorically different learning problem, not a
+# cleaner version of the same one. The 0.5 step is dropped as uninformative. The
+# levels are equally spaced on the noise-to-signal axis the curves are drawn on,
+# since that ratio grows in proportion to sigma.
+SIGMA_MULTIPLIERS = (1.0, 2.0, 3.0, 4.0)
 # 0 keeps the high band; 2.0 is the low band the band-migration sweep settled on.
 HIGH_BAND_SMOOTHING = 0.0
 LOW_BAND_SMOOTHING = 2.0
@@ -61,14 +84,40 @@ METHOD_CONFIG = {
     "binned": "end_to_end_training_runs/synthetic/gpt_transformer_binned",
     "qfat": "end_to_end_training_runs/synthetic/qfat",
     "act": "end_to_end_training_runs/synthetic/kl_cvae_fixed_gaussian",
+    # Plain BC action transformer (direct regression, no CVAE). Candidate to
+    # replace the CVAE "act" arm as the external continuous baseline.
+    "bcat": "end_to_end_training_runs/synthetic/bcat",
+}
+CONDITIONAL_METHOD_CONFIG = {
+    "fast": "end_to_end_training_runs/synthetic/gpt_transformer_conditional",
+    "binned": "end_to_end_training_runs/synthetic/gpt_transformer_binned_conditional",
+    "qfat": "end_to_end_training_runs/synthetic/qfat_conditional",
+    "bcat": "end_to_end_training_runs/synthetic/bcat_conditional",
 }
 CORE_METHODS = ("fast", "binned", "qfat")
+# The finalized comparison: two discrete arms (fast, binned) and two continuous
+# ones (qfat, and the plain action-transformer bcat as the external baseline).
+FINAL_METHODS = ("qfat", "fast", "binned", "bcat")
+
+
+def method_config(task: str, method: str) -> str:
+    """Config name for a method on a task.
+
+    Raises:
+        KeyError: If the method has no config for the task.
+    """
+    configs = CONDITIONAL_METHOD_CONFIG if task == CONDITIONAL_TASK else METHOD_CONFIG
+    return configs[method]
+
 
 # Single source of truth for the matched-capacity arm. Every shared
-# hyperparameter is pinned to the FAST config's value so the action
-# representation is the only factor that moves; prediction_horizon is left alone
-# because 59 vs 60 follows from how each family frames the chunk.
+# hyperparameter is pinned so the action representation is the only factor that
+# moves; prediction_horizon is left alone because 59 vs 60 follows from how each
+# family frames the chunk. Depth is pinned to 4 layers: the qfat and
+# bcat_conditional configs already sit there, and the GPT configs fell back to
+# the decoder default of 6, so the multimodal grids ran with unequal depth.
 MATCHED_OVERRIDES = (
+    "policy.decoder.number_of_layers=4",
     "policy.decoder.number_of_heads=4",
     "policy.decoder.dropout_rate=0.4",
     "policy.decoder.attention_dropout=0.15",
@@ -79,6 +128,19 @@ MATCHED_ACT_EXTRA = (
     "policy.algorithm.posterior_encoder.number_of_heads=4",
     "policy.algorithm.posterior_encoder.dropout_rate=0.4",
     "policy.algorithm.posterior_encoder.attention_dropout=0.15",
+)
+
+# FAST emits a variable number of tokens that grows with the injected noise, so
+# the shared cap of 64 overflows across most of this grid (an early action-noise
+# run crashed eight FAST cells that way). measure_token_length.py found the
+# largest chunk on the position-injection grid to be 94 action tokens; the cap
+# clears that plus the appended EOS with a small margin guarding the tail we did
+# not sample, and also covers the action-injection stores (max 97) kept as an
+# ablation. Applied only to the FAST arm and only here, rather than by editing
+# the shared action_fast.yaml default that other experiments rely on.
+FAST_MAX_TOKEN_LEN = 106
+FAST_OVERRIDES = (
+    f"task.dataloader.tokenization.action_tokenizer.max_token_len={FAST_MAX_TOKEN_LEN}",
 )
 
 BINNING_NUM_BINS = 64
@@ -196,19 +258,38 @@ class TrainCell:
         """Identifier extending the data cell with method and seed."""
         return f"{self.data.name}__{self.method}__seed-{self.seed}"
 
-    def command(self, matched: bool) -> list[str]:
-        """Build the full training command for this cell."""
-        overrides = self.data.schema_overrides() + [f"experiment.seed={self.seed}"]
+    def command(
+        self, matched: bool, extra_overrides: tuple[str, ...] = ()
+    ) -> list[str]:
+        """Build the full training command for this cell.
+
+        The cell name is passed as the experiment name so the run carries its
+        full identity into the output directory and the wandb run name. Without
+        it every cell of a stage logs under the config's own name and the
+        results cannot be matched back to a noise level or a replicate.
+
+        Args:
+            matched: Append the matched-backbone overrides.
+            extra_overrides: Hydra overrides appended last, so they win. Meant
+                for shortening a smoke test, never for a reported comparison.
+        """
+        overrides = self.data.schema_overrides() + [
+            f"experiment.seed={self.seed}",
+            f"experiment.name={self.name}",
+        ]
         if matched:
             overrides += list(MATCHED_OVERRIDES)
             if self.method == "act":
                 overrides += list(MATCHED_ACT_EXTRA)
+        if self.method == "fast":
+            overrides += list(FAST_OVERRIDES)
+        overrides += list(extra_overrides)
         return [
             sys.executable,
             "-m",
             "versatil.endpoints.train",
             "--config-name",
-            METHOD_CONFIG[self.method],
+            method_config(task=self.data.task, method=self.method),
             *overrides,
         ]
 
@@ -260,16 +341,20 @@ STAGES = {
     # Stage A: does the sigma grid span "no effect" to "collapse" at all?
     "pilot": {
         "tasks": ("sequential",),
-        "injections": (ACTION,),
+        "injections": (POSITION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": SIGMA_MULTIPLIERS,
         "methods": CORE_METHODS,
         "replicates": (0,),
     },
-    # Stage B: the main estimand, both tasks, three seeds.
+    # Stage B: the main estimand, both tasks, three seeds. Noise is injected on
+    # the trajectory (position injection), the standard way to make a noisy
+    # demonstration: the whole demonstration is a coherent noisy trajectory, both
+    # the rendered observation and the differenced action label carry it, and both
+    # representations face identical inputs so the comparison stays fair.
     "main": {
         "tasks": ("sequential", "radial"),
-        "injections": (ACTION,),
+        "injections": (POSITION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": SIGMA_MULTIPLIERS,
         "methods": CORE_METHODS,
@@ -285,9 +370,10 @@ STAGES = {
         "replicates": (0, 1, 2),
     },
     # Stage C2: the external baseline, kept out of the discrete/continuous claim.
+    # Same position injection as the main stage so it is comparable.
     "act": {
         "tasks": ("sequential",),
-        "injections": (ACTION,),
+        "injections": (POSITION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": SIGMA_MULTIPLIERS,
         "methods": ("act",),
@@ -302,6 +388,128 @@ STAGES = {
         "multipliers": SIGMA_MULTIPLIERS,
         "methods": CORE_METHODS,
         "replicates": (0,),
+    },
+    # Difficulty probe: one continuous run on corridor at the anchor noise, to
+    # see whether corridor sits between the saturated sequential and the floored
+    # radial. Single seed, one method -- a diagnostic, not an estimand.
+    "probe_corridor": {
+        "tasks": ("corridor",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0,),
+        "methods": ("qfat",),
+        "replicates": (0,),
+    },
+    # External-baseline probe: check whether the plain action transformer (bcat)
+    # is a usable continuous baseline where the CVAE "act" arm collapsed.
+    "probe_bcat": {
+        "tasks": ("sequential",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0,),
+        "methods": ("bcat",),
+        "replicates": (0,),
+    },
+    # Range-finding probe: corridor qfat saturates at sigma=1 (success 1.00), so
+    # the separation between continuous and discrete has to come from higher
+    # noise. Run both arms at sigma=2 and 3 to locate where qfat starts to fall.
+    "probe_corridor_hi": {
+        "tasks": ("corridor",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (2.0, 3.0),
+        "methods": ("qfat", "fast"),
+        "replicates": (0,),
+    },
+    # Range-finding probe: radial floors by sigma=2 on the main grid, so a usable
+    # window sits below the current anchor. Run both arms at sigma=1.2 and 1.4 to
+    # find noise low enough that the continuous arm is not already on the floor.
+    "probe_radial_lo": {
+        "tasks": ("radial",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.2, 1.4),
+        "methods": ("qfat", "fast"),
+        "replicates": (0,),
+    },
+    # The finalized design: one stage per task so each carries its own sigma grid
+    # on the measured-SNR axis. Sequential and corridor span 1-4; radial floors the
+    # discrete arm quickly, so it uses a compressed low grid (range-finding showed
+    # both arms dead by sigma=2). All four methods, three replicates.
+    "final_sequential": {
+        "tasks": ("sequential",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+    },
+    "final_radial": {
+        "tasks": ("radial",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 1.2, 1.4, 1.6),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+    },
+    "final_corridor": {
+        "tasks": ("corridor",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+    },
+    # Single-seed pass of the three settled arms (the external baseline is held
+    # out pending its head choice). Methods are ordered qfat, fast, binned so a
+    # cell's index is sigma_position*3 + method_position; the submitter runs only
+    # the indices not already completed. Multi-seed is the same stages with more
+    # replicates, added once the design is locked.
+    "final_sequential_s0": {
+        "tasks": ("sequential",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": ("qfat", "fast", "binned"),
+        "replicates": (0,),
+    },
+    "final_radial_s0": {
+        "tasks": ("radial",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 1.2, 1.4, 1.6),
+        "methods": ("qfat", "fast", "binned"),
+        "replicates": (0,),
+    },
+    "final_corridor_s0": {
+        "tasks": ("corridor",),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": ("qfat", "fast", "binned"),
+        "replicates": (0,),
+    },
+    # The primary comparison. On the multimodal tasks the continuous arm's
+    # success tracked which modes it kept rather than how accurately it executed
+    # under noise, so the estimand moves to the context-conditioned circle, where
+    # the mode is given and each arm is unimodal. The plain action transformer is
+    # a valid arm here because there is nothing to mode-average. Its reported
+    # number is conditional success: success on the route the context asked for.
+    "final_conditional_s0": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": FINAL_METHODS,
+        "replicates": (0,),
+    },
+    "final_conditional": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
     },
 }
 
@@ -384,7 +592,8 @@ def generate_cell(cell: DataCell) -> dict[str, float | str]:
         config_dir=str(get_hydra_configs_dir()), version_base=None
     ):
         config = compose(
-            config_name=METHOD_CONFIG["fast"], overrides=cell.schema_overrides()
+            config_name=method_config(task=cell.task, method="fast"),
+            overrides=cell.schema_overrides(),
         )
     schema = instantiate(config.task.dataset_schema)
 
@@ -593,13 +802,40 @@ def run_data(stage: str, output_dir: Path, num_episodes: int | None) -> None:
     print(f"\nWrote {manifest}")
 
 
-def run_train(stage: str, matched: bool, dry_run: bool) -> None:
-    """Run (or print) the stage's training commands."""
+def run_train(
+    stage: str,
+    matched: bool,
+    dry_run: bool,
+    index: int | None,
+    extra_overrides: tuple[str, ...] = (),
+) -> None:
+    """Run (or print) the stage's training commands.
+
+    Args:
+        stage: Stage name from ``STAGES``.
+        matched: Apply the matched-backbone overrides.
+        dry_run: Print the commands without running them.
+        index: Zero-based cell to run alone, for one element of a job array.
+            ``None`` runs the whole stage sequentially. The enumeration is
+            deterministic, so an array element and a sequential run at the same
+            position resolve to the same cell.
+        extra_overrides: Hydra overrides appended to every command.
+
+    Raises:
+        IndexError: If ``index`` falls outside the stage.
+    """
     cells = stage_cells(stage)
     check_paths_unique(data_cells(cells))
-    for index, cell in enumerate(cells, start=1):
-        command = cell.command(matched=matched)
-        print(f"[{index}/{len(cells)}] {cell.name}", flush=True)
+    if index is not None:
+        if not 0 <= index < len(cells):
+            raise IndexError(
+                f"Cell index {index} is outside stage '{stage}', which has "
+                f"{len(cells)} cells (valid indices 0-{len(cells) - 1})."
+            )
+        cells = [cells[index]]
+    for position, cell in enumerate(cells, start=1):
+        command = cell.command(matched=matched, extra_overrides=extra_overrides)
+        print(f"[{position}/{len(cells)}] {cell.name}", flush=True)
         if dry_run:
             print("  " + " ".join(command))
             continue
@@ -618,6 +854,19 @@ def main() -> None:
         help="Use each method's own tuned config instead of the matched arm.",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--index",
+        type=int,
+        default=None,
+        help="Zero-based cell to train alone, for one SLURM array element.",
+    )
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra Hydra override, repeatable. For smoke tests, not results.",
+    )
     parser.add_argument(
         "--num-episodes",
         type=int,
@@ -649,6 +898,8 @@ def main() -> None:
         stage=arguments.stage,
         matched=not arguments.tuned,
         dry_run=arguments.dry_run,
+        index=arguments.index,
+        extra_overrides=tuple(arguments.override),
     )
 
 

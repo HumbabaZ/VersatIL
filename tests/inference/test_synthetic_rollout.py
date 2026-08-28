@@ -514,6 +514,203 @@ def test_evaluate_rollouts_forwards_half_expert_mean_path_length(
     assert forwarded == pytest.approx(0.5, abs=1e-6)
 
 
+def _patch_evaluate_rollouts_collaborators(
+    expert_episodes: list[dict[str, np.ndarray]],
+    layout: MagicMock,
+    success_mask: np.ndarray,
+):
+    """Patches every metric collaborator of evaluate_rollouts except assignment."""
+    num_rollouts = success_mask.shape[0]
+    success_masks = _all_false_success_masks(num_rollouts=num_rollouts)
+    success_masks["success_mask"] = success_mask
+    return (
+        patch(
+            "versatil.inference.synthetic_rollout.generate_task_episodes",
+            return_value=expert_episodes,
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout.get_task_layout",
+            return_value=layout,
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout.compute_mode_coverage",
+            return_value={
+                "mode_coverage": 0.0,
+                "mode_entropy_ratio": 0.0,
+                "per_mode_count": {0: num_rollouts},
+            },
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout.compute_mode_endpoints",
+            return_value=np.zeros((layout.num_modes, 2), dtype=np.float32),
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout.compute_success_masks",
+            return_value=success_masks,
+        ),
+        patch(
+            "versatil.inference.synthetic_rollout.compute_success_rates_from_masks",
+            return_value={
+                "success_rate": float(np.mean(success_mask)),
+                "collision_rate": 0.0,
+                "endpoint_reach_rate": 0.0,
+                "path_length_rate": 0.0,
+            },
+        ),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "assigned_modes, expected_mode_ids, success_mask, "
+    "expected_accuracy, expected_conditional_success",
+    [
+        ([0, 1, 0, 1], [0, 1, 0, 1], [True, True, True, True], 1.0, 1.0),
+        ([0, 0, 0, 0], [0, 1, 0, 1], [True, True, True, True], 0.5, 0.5),
+        ([0, 1, 0, 1], [0, 1, 0, 1], [True, False, True, False], 1.0, 0.5),
+        ([1, 0, 1, 0], [0, 1, 0, 1], [True, True, True, True], 0.0, 0.0),
+    ],
+)
+def test_evaluate_rollouts_scores_context_accuracy_against_requested_modes(
+    rollout_trajectory_factory: Callable[..., np.ndarray],
+    mock_expert_episodes_factory: Callable[..., list[dict[str, np.ndarray]]],
+    mock_layout_factory: Callable[..., MagicMock],
+    assigned_modes: list[int],
+    expected_mode_ids: list[int],
+    success_mask: list[bool],
+    expected_accuracy: float,
+    expected_conditional_success: float,
+):
+    num_rollouts = 4
+    num_modes = 2
+    rollout_trajectories = rollout_trajectory_factory(
+        num_rollouts=num_rollouts, num_timesteps=5
+    )
+    expert_episodes = mock_expert_episodes_factory(
+        num_episodes=4, num_timesteps=5, num_modes=num_modes
+    )
+    layout = mock_layout_factory(num_modes=num_modes)
+    patches = _patch_evaluate_rollouts_collaborators(
+        expert_episodes=expert_episodes,
+        layout=layout,
+        success_mask=np.array(success_mask),
+    )
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patch(
+            "versatil.inference.synthetic_rollout.assign_rollout_modes",
+            return_value=np.array(assigned_modes, dtype=np.int64),
+        ) as mock_assign,
+    ):
+        results = evaluate_rollouts(
+            rollout_trajectories=rollout_trajectories,
+            task_name=SyntheticTaskName.CONDITIONAL_CIRCLE.value,
+            num_expert_episodes=4,
+            num_modes=num_modes,
+            expected_mode_ids=np.array(expected_mode_ids, dtype=np.int64),
+        )
+
+    assign_kwargs = mock_assign.call_args.kwargs
+    assert assign_kwargs["generated_trajectories"].shape == (num_rollouts, 5, 2)
+    assert assign_kwargs["num_modes"] == num_modes
+    assert results["context_accuracy"] == pytest.approx(expected_accuracy)
+    assert results["conditional_success_rate"] == pytest.approx(
+        expected_conditional_success
+    )
+
+
+@pytest.mark.unit
+def test_evaluate_rollouts_omits_context_metrics_without_expected_modes(
+    rollout_trajectory_factory: Callable[..., np.ndarray],
+    mock_expert_episodes_factory: Callable[..., list[dict[str, np.ndarray]]],
+    mock_layout_factory: Callable[..., MagicMock],
+):
+    rollout_trajectories = rollout_trajectory_factory(num_rollouts=3, num_timesteps=5)
+    expert_episodes = mock_expert_episodes_factory(
+        num_episodes=4, num_timesteps=5, num_modes=2
+    )
+    layout = mock_layout_factory(num_modes=2)
+    patches = _patch_evaluate_rollouts_collaborators(
+        expert_episodes=expert_episodes,
+        layout=layout,
+        success_mask=np.ones(3, dtype=bool),
+    )
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patch(
+            "versatil.inference.synthetic_rollout.assign_rollout_modes"
+        ) as mock_assign,
+    ):
+        results = evaluate_rollouts(
+            rollout_trajectories=rollout_trajectories,
+            task_name=SyntheticTaskName.CIRCLE.value,
+            num_expert_episodes=4,
+            num_modes=2,
+        )
+
+    mock_assign.assert_not_called()
+    assert "context_accuracy" not in results
+    assert "conditional_success_rate" not in results
+
+
+@pytest.mark.unit
+def test_evaluate_rollouts_rejects_expected_modes_of_wrong_length(
+    rollout_trajectory_factory: Callable[..., np.ndarray],
+    mock_expert_episodes_factory: Callable[..., list[dict[str, np.ndarray]]],
+    mock_layout_factory: Callable[..., MagicMock],
+):
+    num_rollouts = 3
+    rollout_trajectories = rollout_trajectory_factory(
+        num_rollouts=num_rollouts, num_timesteps=5
+    )
+    expert_episodes = mock_expert_episodes_factory(
+        num_episodes=4, num_timesteps=5, num_modes=2
+    )
+    layout = mock_layout_factory(num_modes=2)
+    patches = _patch_evaluate_rollouts_collaborators(
+        expert_episodes=expert_episodes,
+        layout=layout,
+        success_mask=np.ones(num_rollouts, dtype=bool),
+    )
+    expected_mode_ids = np.array([0, 1], dtype=np.int64)
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        pytest.raises(
+            ValueError,
+            match=re.escape(
+                f"expected_mode_ids has {expected_mode_ids.shape[0]} entries but "
+                f"there are {num_rollouts} rollouts; pass one requested mode per "
+                "rollout."
+            ),
+        ),
+    ):
+        evaluate_rollouts(
+            rollout_trajectories=rollout_trajectories,
+            task_name=SyntheticTaskName.CONDITIONAL_CIRCLE.value,
+            num_expert_episodes=4,
+            num_modes=2,
+            expected_mode_ids=expected_mode_ids,
+        )
+
+
 @pytest.mark.unit
 def test_expert_endpoint_reach_threshold_returns_mean_plus_five_std():
     mode_endpoints = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32)

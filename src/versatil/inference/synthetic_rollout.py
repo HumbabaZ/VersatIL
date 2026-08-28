@@ -35,6 +35,7 @@ from versatil.data.synthetic.visualization import (
     save_rollouts_gif,
 )
 from versatil.metrics.synthetic_metrics import (
+    assign_rollout_modes,
     compute_mode_coverage,
     compute_mode_endpoints,
     compute_success_masks,
@@ -302,6 +303,7 @@ def evaluate_rollouts(
     num_modes: int = MULTIPATH_DEFAULT_NUM_MODES,
     num_styles: int = CORRIDOR_DEFAULT_NUM_STYLES,
     image_size: int = DEFAULT_IMAGE_SIZE,
+    expected_mode_ids: np.ndarray | None = None,
 ) -> dict[str, float | dict[int, int]]:
     """Evaluate rollout trajectories against regenerated expert demonstrations.
 
@@ -322,10 +324,20 @@ def evaluate_rollouts(
         num_modes: Number of modes for expert generation.
         num_styles: Number of styles (trajectory_style task only).
         image_size: Image size for expert generation.
+        expected_mode_ids: For context-conditioned rollouts, the mode each
+            rollout was asked for, shape (num_rollouts,). Success alone accepts
+            any mode's endpoint, so it cannot tell a policy that follows the
+            context from one that ignores it; passing this adds that check.
 
     Returns:
         Dict with raw mode coverage metrics, valid mode coverage metrics,
         success_rate, collision_rate, endpoint_reach_rate, and path_length_rate.
+        With ``expected_mode_ids`` it also holds context_accuracy, the fraction
+        of rollouts assigned to the requested mode, and conditional_success_rate,
+        the fraction that succeeded on the requested mode.
+
+    Raises:
+        ValueError: If ``expected_mode_ids`` has one entry per rollout missing.
     """
     expert_episodes = generate_task_episodes(
         task_name=task_name,
@@ -393,6 +405,28 @@ def evaluate_rollouts(
     results["valid_mode_coverage"] = valid_coverage_results["mode_coverage"]
     results["valid_mode_entropy_ratio"] = valid_coverage_results["mode_entropy_ratio"]
     results.update(success_stats)
+    if expected_mode_ids is not None:
+        num_rollouts = rollout_trajectories.shape[0]
+        if expected_mode_ids.shape[0] != num_rollouts:
+            raise ValueError(
+                f"expected_mode_ids has {expected_mode_ids.shape[0]} entries but "
+                f"there are {num_rollouts} rollouts; pass one requested mode per "
+                "rollout."
+            )
+        assigned_modes = assign_rollout_modes(
+            generated_trajectories=rollout_comparison_trajectories,
+            expert_trajectories=expert_comparison_trajectories,
+            expert_mode_ids=expert_mode_ids,
+            num_modes=layout.num_modes,
+        )
+        context_mask = assigned_modes == expected_mode_ids
+        conditional_success_mask = success_masks["success_mask"] & context_mask
+        results["context_accuracy"] = (
+            float(np.mean(context_mask)) if num_rollouts else 0.0
+        )
+        results["conditional_success_rate"] = (
+            float(np.mean(conditional_success_mask)) if num_rollouts else 0.0
+        )
     return results
 
 

@@ -8,6 +8,7 @@ import pytest
 
 from versatil.metrics.synthetic_metrics import (
     _compute_mode_centroids,
+    assign_rollout_modes,
     collides_with_obstacles,
     compute_goal_success_rate,
     compute_mode_coverage,
@@ -125,6 +126,67 @@ def test_compute_mode_coverage_matches_covered_mode_fraction(
     )
 
     assert result["mode_coverage"] == pytest.approx(expected_coverage)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "per_mode_counts",
+    [
+        [2, 3, 1],
+        [4, 0, 0],
+        [0, 2, 2],
+    ],
+)
+def test_assign_rollout_modes_returns_nearest_mode_per_trajectory(
+    expert_data_factory: Callable[..., tuple[np.ndarray, np.ndarray]],
+    multi_mode_generated_factory: Callable[..., np.ndarray],
+    per_mode_counts: list[int],
+):
+    expert_trajectories, expert_mode_ids = expert_data_factory()
+    generated = multi_mode_generated_factory(per_mode_counts=per_mode_counts)
+    expected = np.concatenate(
+        [
+            np.full(count, mode_index, dtype=np.int64)
+            for mode_index, count in enumerate(per_mode_counts)
+        ]
+    )
+
+    assigned = assign_rollout_modes(
+        generated_trajectories=generated,
+        expert_trajectories=expert_trajectories,
+        expert_mode_ids=expert_mode_ids,
+        num_modes=NUM_MODES,
+    )
+
+    assert assigned.dtype == np.int64
+    np.testing.assert_array_equal(assigned, expected)
+
+
+@pytest.mark.unit
+def test_compute_mode_coverage_counts_match_assign_rollout_modes(
+    expert_data_factory: Callable[..., tuple[np.ndarray, np.ndarray]],
+    multi_mode_generated_factory: Callable[..., np.ndarray],
+):
+    per_mode_counts = [1, 3, 2]
+    expert_trajectories, expert_mode_ids = expert_data_factory()
+    generated = multi_mode_generated_factory(per_mode_counts=per_mode_counts)
+
+    assigned = assign_rollout_modes(
+        generated_trajectories=generated,
+        expert_trajectories=expert_trajectories,
+        expert_mode_ids=expert_mode_ids,
+        num_modes=NUM_MODES,
+    )
+    result = compute_mode_coverage(
+        generated_trajectories=generated,
+        expert_trajectories=expert_trajectories,
+        expert_mode_ids=expert_mode_ids,
+        num_modes=NUM_MODES,
+    )
+
+    expected_counts = np.bincount(assigned, minlength=NUM_MODES)
+    for mode_index in range(NUM_MODES):
+        assert result["per_mode_count"][mode_index] == expected_counts[mode_index]
 
 
 @pytest.mark.unit

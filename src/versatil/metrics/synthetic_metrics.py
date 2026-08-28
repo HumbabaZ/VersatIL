@@ -35,23 +35,17 @@ def compute_mode_coverage(
                 assignment distribution (1.0 = uniform, 0.0 = single mode).
             "per_mode_count": dict mapping mode index to assignment count.
     """
-    mode_centroids = _compute_mode_centroids(
+    assigned_modes = assign_rollout_modes(
+        generated_trajectories=generated_trajectories,
         expert_trajectories=expert_trajectories,
         expert_mode_ids=expert_mode_ids,
         num_modes=num_modes,
     )
     per_mode_count = dict.fromkeys(range(num_modes), 0)
-    for rollout_index, trajectory in enumerate(generated_trajectories):
+    for rollout_index, assigned_mode in enumerate(assigned_modes):
         if valid_mask is not None and not valid_mask[rollout_index]:
             continue
-        distances = np.array(
-            [
-                np.mean(np.linalg.norm(trajectory - centroid, axis=-1))
-                for centroid in mode_centroids
-            ]
-        )
-        assigned_mode = int(np.argmin(distances))
-        per_mode_count[assigned_mode] += 1
+        per_mode_count[int(assigned_mode)] += 1
     covered_modes = sum(1 for count in per_mode_count.values() if count > 0)
     mode_coverage = covered_modes / num_modes
     total_assignments = sum(per_mode_count.values())
@@ -74,6 +68,46 @@ def compute_mode_coverage(
         "mode_entropy_ratio": mode_entropy_ratio,
         "per_mode_count": per_mode_count,
     }
+
+
+def assign_rollout_modes(
+    generated_trajectories: np.ndarray,
+    expert_trajectories: np.ndarray,
+    expert_mode_ids: np.ndarray,
+    num_modes: int,
+) -> np.ndarray:
+    """Assign each generated trajectory to its nearest expert mode.
+
+    Nearest is the smallest mean L2 distance over the full trajectory to the
+    per-mode mean expert trajectory.
+
+    Args:
+        generated_trajectories: Predicted Cartesian trajectories (x, y).
+            Shape (num_rollouts, num_timesteps, 2).
+        expert_trajectories: Expert demonstration trajectories (x, y).
+            Shape (num_expert, num_timesteps, 2).
+        expert_mode_ids: Ground-truth mode label per expert trajectory.
+            Shape (num_expert,).
+        num_modes: Total number of distinct behavioral modes.
+
+    Returns:
+        Integer array of shape (num_rollouts,) with the assigned mode index.
+    """
+    mode_centroids = _compute_mode_centroids(
+        expert_trajectories=expert_trajectories,
+        expert_mode_ids=expert_mode_ids,
+        num_modes=num_modes,
+    )
+    assigned = np.zeros(generated_trajectories.shape[0], dtype=np.int64)
+    for rollout_index, trajectory in enumerate(generated_trajectories):
+        distances = np.array(
+            [
+                np.mean(np.linalg.norm(trajectory - centroid, axis=-1))
+                for centroid in mode_centroids
+            ]
+        )
+        assigned[rollout_index] = int(np.argmin(distances))
+    return assigned
 
 
 def compute_goal_success_rate(
