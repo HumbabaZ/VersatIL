@@ -40,8 +40,11 @@ NAME_PATTERN = re.compile(
     r"^(?P<task>[^_]+)__inj-(?P<injection>[^_]+)__band-(?P<band>[^_]+)"
     r"__sig-(?P<sigma_multiplier>[\d.]+)__dseed-(?P<data_seed>\d+)"
     r"(?:__ep-(?P<num_episodes>\d+))?"
+    r"(?:__T-(?P<trajectory_length>\d+))?"
     r"__(?P<method>[^_]+)__seed-(?P<train_seed>\d+)$"
 )
+# Cells at the benchmark's default episode length carry no length in their name.
+DEFAULT_TRAJECTORY_LENGTH = 60
 FAILURE_MARKERS = ("Traceback", "CANCELLED", "Out of memory", "CUDA out of memory")
 
 
@@ -123,6 +126,9 @@ def summarize(result: RunResult) -> dict[str, float | str | int]:
         "injection": fields.group("injection"),
         "band": fields.group("band"),
         "sigma_multiplier": float(fields.group("sigma_multiplier")),
+        "trajectory_length": int(
+            fields.group("trajectory_length") or DEFAULT_TRAJECTORY_LENGTH
+        ),
         "data_seed": int(fields.group("data_seed")),
         "method": fields.group("method"),
         "train_seed": int(fields.group("train_seed")),
@@ -181,6 +187,7 @@ def collect(log_dir: Path, pattern: str) -> list[dict[str, float | str | int]]:
     rows.sort(
         key=lambda row: (
             str(row["task"]),
+            int(row["trajectory_length"]),
             str(row["method"]),
             float(row["sigma_multiplier"]),
             int(row["train_seed"]),
@@ -206,10 +213,14 @@ def report(rows: list[dict[str, float | str | int]]) -> None:
     graded = [row for row in rows if row["final_success"] != ""]
     if not graded:
         return
-    print(f"\n{'task':<11}{'method':<9}{'sigma':>7}{'seed':>6}{'final':>8}{'best':>8}")
+    print(
+        f"\n{'task':<11}{'T':>5}{'method':<9}{'sigma':>7}{'seed':>6}"
+        f"{'final':>8}{'best':>8}"
+    )
     for row in graded:
         print(
-            f"{str(row['task']):<11}{str(row['method']):<9}"
+            f"{str(row['task']):<11}{int(row['trajectory_length']):>5}"
+            f"{str(row['method']):<9}"
             f"{float(row['sigma_multiplier']):>7.1f}{int(row['train_seed']):>6}"
             f"{float(row['final_success']):>8.2f}{float(row['best_success']):>8.2f}"
         )

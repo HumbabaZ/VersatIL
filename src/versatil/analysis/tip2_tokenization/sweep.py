@@ -32,11 +32,14 @@ from pathlib import Path
 from versatil.analysis.tip1_noise.sweep import TASK_SCHEMA_GROUP
 from versatil.analysis.tip2_tokenization.stores import STORES, Tip2Store
 
-# Seven feasible FAST scales per task from calibrate_fast_scale on each task's
-# fixed default-noise store, degenerate (every coefficient rounds to zero) to
-# fine. The grid is task-specific because it is derived from the task's own
-# action coefficient distribution; full precision so the fitted grid matches
-# calibration. sequential: 0.012 store; conditional: 0.008 store.
+# Seven FAST scales per task, coarse (every coefficient rounds to zero) to fine.
+# sequential (archived) uses the raw calibrate_fast_scale grid on its 0.012 store.
+# conditional (main line) uses a rounded grid the user picked for figure
+# readability (2026-08-28), each value feasibility-checked on the 0.008 store:
+# alphabet <= vocab 1024 and longest token sequence + observation prefix < the
+# 512 decoder budget. 0.1 sits in the fully-degenerate collapse regime (the
+# coarse anchor, unique sequence count 1); 250 is the finest that keeps the DCT
+# alphabet (892) under the vocabulary -- 300 overflows it (alphabet 1070).
 FAST_SCALES = {
     "sequential": (
         0.41631974215059914,
@@ -47,15 +50,7 @@ FAST_SCALES = {
         67.832123263425,
         187.86120017758375,
     ),
-    "conditional": (
-        0.28010148101104365,
-        0.8787208593846062,
-        2.7566807070440906,
-        8.64812578355214,
-        27.130483184733638,
-        85.11244358136324,
-        267.01065377512424,
-    ),
+    "conditional": (0.1, 1.0, 3.0, 10.0, 30.0, 100.0, 250.0),
 }
 # Binning coarse->fine per the master plan: {4, 16} coarse probes, {64, 256,
 # 1024} a 4x-spaced middle where 256 is the operating point the trained
@@ -63,11 +58,11 @@ FAST_SCALES = {
 # probes. Binning always emits horizon * action_dim tokens plus EOS, so
 # num_bins only sizes the output vocabulary and the shared cap of 120 fits all.
 NUM_BINS_GRID = (4, 16, 64, 256, 1024, 2048, 4096)
-# Per-task FAST token cap: calibrated worst-case token length plus one. Injected
-# on FAST cells only; the shared yaml stays 64. conditional circles carry richer
-# DCT content, so their finest scale runs longer (182 -> 183) than sequential's
-# (118 -> 119). Both leave ample room under the 512 decoder budget.
-FAST_MAX_TOKEN_LEN = {"sequential": 119, "conditional": 183}
+# Per-task FAST token cap: worst-case token length over the grid plus one.
+# Injected on FAST cells only; the shared yaml stays 64. conditional's finest
+# scale 250 runs to 150 tokens (-> 151); sequential's finest to 118 (-> 119).
+# Both leave ample room under the 512 decoder budget.
+FAST_MAX_TOKEN_LEN = {"sequential": 119, "conditional": 151}
 
 DATA_SEED = 42
 TRAIN_SEEDS = (0, 1, 2)

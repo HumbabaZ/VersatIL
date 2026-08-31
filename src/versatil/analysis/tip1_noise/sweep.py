@@ -44,7 +44,10 @@ from versatil.data.preprocessing.create_zarr_from_synthetic import (
     create_replay_buffer_from_synthetic,
 )
 from versatil.data.preprocessing.replay_buffer import ReplayBuffer
-from versatil.data.synthetic.constants import NoiseInjection
+from versatil.data.synthetic.constants import (
+    MULTIPATH_DEFAULT_TRAJECTORY_LENGTH,
+    NoiseInjection,
+)
 
 # Noise is expressed as a multiple of each task's own default, because the tasks
 # differ severalfold in action magnitude and a shared absolute sigma would put
@@ -98,6 +101,10 @@ CORE_METHODS = ("fast", "binned", "qfat")
 # The finalized comparison: two discrete arms (fast, binned) and two continuous
 # ones (qfat, and the plain action-transformer bcat as the external baseline).
 FINAL_METHODS = ("qfat", "fast", "binned", "bcat")
+# The tokenized arms frame the chunk one step shorter than the continuous ones:
+# an episode of T positions has T-1 real actions plus a zero sentinel, and the
+# tokenizer never sees the sentinel.
+TOKENIZED_METHODS = ("fast", "binned")
 
 
 def method_config(task: str, method: str) -> str:
@@ -139,11 +146,50 @@ MATCHED_ACT_EXTRA = (
 # ablation. Applied only to the FAST arm and only here, rather than by editing
 # the shared action_fast.yaml default that other experiments rely on.
 FAST_MAX_TOKEN_LEN = 106
-FAST_OVERRIDES = (
-    f"task.dataloader.tokenization.action_tokenizer.max_token_len={FAST_MAX_TOKEN_LEN}",
+ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY = (
+    "task.dataloader.tokenization.action_tokenizer.max_token_len"
 )
+FAST_OVERRIDES = (f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={FAST_MAX_TOKEN_LEN}",)
+# The cap depends on the chunk length: a denser-sampled loop has more DCT
+# coefficients, and FAST's post-BPE length grows with them in a data-dependent
+# way, so each trajectory length gets its own measured value. A length missing
+# here fails at command time rather than on the first training batch.
+# The 120 and 240 entries are provisional upper bounds set so the control-rate
+# stage could be submitted unattended: a 120-step chunk has 238 coefficients
+# and a 240-step chunk 478 before BPE, and BPE has been seen to expand a noisy
+# chunk by up to ~1.4x, so each bound clears that with room. Padding is masked
+# out of the loss, so an oversized cap only lengthens the attended sequence.
+# Replace them with the values measure_token_length.py reports for the stage.
+FAST_MAX_TOKEN_LEN_BY_LENGTH = {
+    MULTIPATH_DEFAULT_TRAJECTORY_LENGTH: FAST_MAX_TOKEN_LEN,
+    120: 400,
+    240: 800,
+}
+# The GPT decoders size a precomputed positional table from this; the default of
+# 512 leaves a binned chunk at 240 steps (478 tokens plus prefix) a margin of a
+# few tokens, so longer chunks raise it. It costs no parameters.
+GPT_MAX_SEQ_LEN_KEY = "policy.decoder.max_seq_len"
+GPT_LONG_MAX_SEQ_LEN = 1024
 
 BINNING_NUM_BINS = 64
+
+
+def fast_max_token_len(trajectory_length: int) -> int:
+    """FAST token cap measured for a trajectory length.
+
+    Raises:
+        ValueError: If no measurement exists for the length, naming the tool
+            that produces one.
+    """
+    if trajectory_length not in FAST_MAX_TOKEN_LEN_BY_LENGTH:
+        raise ValueError(
+            "FAST max_token_len is not measured for "
+            f"trajectory_length={trajectory_length}; run "
+            "measure_token_length.py --stage <stage> and add the value to "
+            "FAST_MAX_TOKEN_LEN_BY_LENGTH."
+        )
+    return FAST_MAX_TOKEN_LEN_BY_LENGTH[trajectory_length]
+
 
 # A replicate index picks both the demonstration-noise draw and the training
 # seed, so the two vary together and the spread across replicates covers both.
@@ -189,11 +235,26 @@ class DataCell:
     sigma_multiplier: float
     data_seed: int = 42
     num_episodes: int | None = None
+    # Timesteps per episode. The path is fixed, so a longer episode samples the
+    # same geometry denser: this is the control-rate axis.
+    trajectory_length: int = MULTIPATH_DEFAULT_TRAJECTORY_LENGTH
 
     @property
     def noise_std(self) -> float:
-        """Absolute noise scale for this task's default and this multiplier."""
-        return self.sigma_multiplier * TASK_DEFAULT_NOISE_STD[self.task]
+        """Absolute noise scale for this task's default and this multiplier.
+
+        Scaled inversely with the trajectory length so the per-step
+        signal-to-noise ratio stays fixed along the control-rate axis: the
+        clean per-step displacement shrinks with denser sampling, and position
+        noise is drawn per step, so an unscaled noise would confound the rate
+        with the noise level.
+        """
+        return (
+            self.sigma_multiplier
+            * TASK_DEFAULT_NOISE_STD[self.task]
+            * MULTIPATH_DEFAULT_TRAJECTORY_LENGTH
+            / self.trajectory_length
+        )
 
     @property
     def band(self) -> str:
@@ -201,13 +262,21 @@ class DataCell:
         return "high" if self.smoothing_sigma <= 0.0 else "low"
 
     @property
+    def has_default_length(self) -> bool:
+        """Whether the episode length is the benchmark default."""
+        return self.trajectory_length == MULTIPATH_DEFAULT_TRAJECTORY_LENGTH
+
+    @property
     def name(self) -> str:
         """Filesystem-safe identifier carrying every generation parameter.
 
-        ``num_episodes`` joins the name when it is overridden, so a smoke-test
-        store can never be mistaken for the full one at the same noise setting.
+        ``num_episodes`` and a non-default ``trajectory_length`` join the name
+        when set, so a smoke-test store or a denser-sampled store can never be
+        mistaken for the default one at the same noise setting.
         """
         suffix = "" if self.num_episodes is None else f"__ep-{self.num_episodes}"
+        if not self.has_default_length:
+            suffix += f"__T-{self.trajectory_length}"
         return (
             f"{self.task}__inj-{self.injection}__band-{self.band}"
             f"__sig-{self.sigma_multiplier:g}__dseed-{self.data_seed}{suffix}"
@@ -229,6 +298,11 @@ class DataCell:
             if self.num_episodes is None
             else [f"task.dataset_schema.num_episodes={self.num_episodes}"]
         )
+        length_override = (
+            []
+            if self.has_default_length
+            else [f"task.dataset_schema.trajectory_length={self.trajectory_length}"]
+        )
         return [
             f"task/dataset_schema={TASK_SCHEMA_GROUP[self.task]}",
             f"task.dataset_schema.zarr_path={self.zarr_path}",
@@ -237,6 +311,7 @@ class DataCell:
             f"task.dataset_schema.noise_injection={self.injection}",
             f"task.dataset_schema.seed={self.data_seed}",
             *episode_override,
+            *length_override,
             # The rollout reference must not follow the training noise: it sets the
             # mode centroids, the success threshold and the radial obstacle
             # geometry, so letting it drift would loosen the bar exactly where
@@ -258,6 +333,60 @@ class TrainCell:
         """Identifier extending the data cell with method and seed."""
         return f"{self.data.name}__{self.method}__seed-{self.seed}"
 
+    @property
+    def prediction_horizon(self) -> int:
+        """Chunk length covering the whole episode for this method's family."""
+        if self.method in TOKENIZED_METHODS:
+            return self.data.trajectory_length - 1
+        return self.data.trajectory_length
+
+    def length_overrides(self) -> list[str]:
+        """Hydra overrides that follow a non-default episode length.
+
+        The chunk must still cover the whole episode, so the horizon moves with
+        the length. Binning emits a fixed two tokens per step and its cap must
+        clear that count plus the EOS; both GPT arms get a longer positional
+        table so a long chunk plus its observation prefix fits.
+        """
+        if self.data.has_default_length:
+            return []
+        overrides = [f"task.prediction_horizon={self.prediction_horizon}"]
+        if self.method == "binned":
+            binned_tokens = 2 * self.prediction_horizon + 2
+            overrides.append(f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={binned_tokens}")
+        if self.method in TOKENIZED_METHODS:
+            overrides.append(f"{GPT_MAX_SEQ_LEN_KEY}={GPT_LONG_MAX_SEQ_LEN}")
+        return overrides
+
+    def overrides(
+        self, matched: bool, extra_overrides: tuple[str, ...] = ()
+    ) -> list[str]:
+        """Every Hydra override the training command carries, in order.
+
+        Args:
+            matched: Append the matched-backbone overrides.
+            extra_overrides: Hydra overrides appended last, so they win. Meant
+                for shortening a smoke test, never for a reported comparison.
+
+        Raises:
+            ValueError: If the FAST arm has no measured token cap for this
+                cell's trajectory length.
+        """
+        overrides = self.data.schema_overrides() + [
+            f"experiment.seed={self.seed}",
+            f"experiment.name={self.name}",
+        ]
+        if matched:
+            overrides += list(MATCHED_OVERRIDES)
+            if self.method == "act":
+                overrides += list(MATCHED_ACT_EXTRA)
+        overrides += self.length_overrides()
+        if self.method == "fast":
+            cap = fast_max_token_len(self.data.trajectory_length)
+            overrides.append(f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={cap}")
+        overrides += list(extra_overrides)
+        return overrides
+
     def command(
         self, matched: bool, extra_overrides: tuple[str, ...] = ()
     ) -> list[str]:
@@ -273,24 +402,13 @@ class TrainCell:
             extra_overrides: Hydra overrides appended last, so they win. Meant
                 for shortening a smoke test, never for a reported comparison.
         """
-        overrides = self.data.schema_overrides() + [
-            f"experiment.seed={self.seed}",
-            f"experiment.name={self.name}",
-        ]
-        if matched:
-            overrides += list(MATCHED_OVERRIDES)
-            if self.method == "act":
-                overrides += list(MATCHED_ACT_EXTRA)
-        if self.method == "fast":
-            overrides += list(FAST_OVERRIDES)
-        overrides += list(extra_overrides)
         return [
             sys.executable,
             "-m",
             "versatil.endpoints.train",
             "--config-name",
             method_config(task=self.data.task, method=self.method),
-            *overrides,
+            *self.overrides(matched=matched, extra_overrides=extra_overrides),
         ]
 
 
@@ -302,6 +420,7 @@ def _cells(
     methods: tuple[str, ...],
     replicates: tuple[int, ...],
     num_episodes: int | None = None,
+    trajectory_lengths: tuple[int, ...] = (MULTIPATH_DEFAULT_TRAJECTORY_LENGTH,),
 ) -> list[TrainCell]:
     """Expand the axes into training cells, one replicate per noise realization.
 
@@ -313,8 +432,10 @@ def _cells(
     stay paired and the run count is unchanged.
     """
     train_cells = []
-    for task, injection, smoothing, multiplier, replicate in itertools.product(
-        tasks, injections, smoothings, multipliers, replicates
+    # Lengths sit inside the noise loop and outside the replicate loop, so a
+    # stage that keeps the default length enumerates exactly as before.
+    for task, injection, smoothing, multiplier, length, replicate in itertools.product(
+        tasks, injections, smoothings, multipliers, trajectory_lengths, replicates
     ):
         # At zero noise the band is a no-op, so only keep the high-band copy.
         if multiplier == 0.0 and smoothing != HIGH_BAND_SMOOTHING:
@@ -326,6 +447,7 @@ def _cells(
             sigma_multiplier=multiplier,
             data_seed=DATA_SEEDS[replicate],
             num_episodes=num_episodes,
+            trajectory_length=length,
         )
         for method in methods:
             train_cells.append(
@@ -511,6 +633,30 @@ STAGES = {
         "methods": FINAL_METHODS,
         "replicates": (0, 1, 2),
     },
+    # The control-rate axis: the same loop sampled 2x and 4x denser at the
+    # anchor noise, with noise_std scaled down to hold the per-step SNR. This is
+    # the regime FAST's own claim is about (a high control rate makes per-step
+    # binning long and low-information), separate from the noise axis above.
+    # The first four cells coincide with final_conditional_s0's sigma=1 cells
+    # and are already trained, so a submission starts at index 4.
+    "rate_conditional_s0": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0,),
+        "trajectory_lengths": (60, 120, 240),
+        "methods": FINAL_METHODS,
+        "replicates": (0,),
+    },
+    "rate_conditional": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0,),
+        "trajectory_lengths": (60, 120, 240),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+    },
 }
 
 
@@ -619,6 +765,7 @@ def generate_cell(cell: DataCell) -> dict[str, float | str]:
         "injection": cell.injection,
         "band": cell.band,
         "sigma_multiplier": cell.sigma_multiplier,
+        "trajectory_length": cell.trajectory_length,
         "noise_std": cell.noise_std,
         "zarr_path": cell.zarr_path,
         "num_timesteps": int(actions.shape[0]),
@@ -669,6 +816,7 @@ def measured_snr(cell: DataCell, actions: np.ndarray) -> float:
         sigma_multiplier=0.0,
         data_seed=cell.data_seed,
         num_episodes=cell.num_episodes,
+        trajectory_length=cell.trajectory_length,
     )
     clean_actions = np.asarray(
         ReplayBuffer.create_from_path(clean_cell.zarr_path)[
@@ -698,6 +846,7 @@ def clean_reference_range(cell: DataCell) -> float | None:
         sigma_multiplier=0.0,
         data_seed=cell.data_seed,
         num_episodes=cell.num_episodes,
+        trajectory_length=cell.trajectory_length,
     )
     if not Path(reference_cell.zarr_path).exists():
         return None
@@ -719,10 +868,10 @@ def add_effective_bins(
     spent representing noise rather than signal.
     """
     by_name = {cell.name: cell for cell in cells}
-    reference_cache: dict[tuple[str, str, int], float | None] = {}
+    reference_cache: dict[tuple[str, str, int, int], float | None] = {}
     for row in rows:
         cell = by_name[str(row["cell"])]
-        key = (cell.task, cell.injection, cell.data_seed)
+        key = (cell.task, cell.injection, cell.data_seed, cell.trajectory_length)
         if key not in reference_cache:
             reference_cache[key] = clean_reference_range(cell)
         reference = reference_cache[key]
@@ -754,6 +903,7 @@ def reference_cells(cells: list[DataCell]) -> list[DataCell]:
             sigma_multiplier=0.0,
             data_seed=cell.data_seed,
             num_episodes=cell.num_episodes,
+            trajectory_length=cell.trajectory_length,
         )
         for cell in cells
     }
@@ -777,7 +927,13 @@ def run_data(stage: str, output_dir: Path, num_episodes: int | None) -> None:
     # Sorted so each replicate's zero-noise store is built before the noisy
     # cells that measure their signal-to-noise ratio against it.
     cells = sorted(
-        cells, key=lambda item: (item.task, item.data_seed, item.sigma_multiplier)
+        cells,
+        key=lambda item: (
+            item.task,
+            item.trajectory_length,
+            item.data_seed,
+            item.sigma_multiplier,
+        ),
     )
     rows = []
     for index, cell in enumerate(cells, start=1):

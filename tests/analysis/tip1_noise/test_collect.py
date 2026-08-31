@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from versatil.analysis.tip1_noise.collect import parse_log, summarize
+from versatil.analysis.tip1_noise.collect import NAME_PATTERN, parse_log, summarize
 
 CELL_NAME = "conditional__inj-position__band-high__sig-2__dseed-42__fast__seed-0"
 COMMON_FIELDS = (
@@ -107,6 +107,49 @@ def test_summarize_reports_context_fields_only_when_logged(
     assert row["final_conditional_success"] == (
         pytest.approx(expected_conditional) if with_context else expected_conditional
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "cell_name, expected_length, expected_episodes",
+    [
+        (
+            "conditional__inj-position__band-high__sig-1__dseed-42__fast__seed-0",
+            None,
+            None,
+        ),
+        (
+            "conditional__inj-position__band-high__sig-1__dseed-42__T-240__binned__seed-0",
+            "240",
+            None,
+        ),
+        (
+            "conditional__inj-position__band-high__sig-1__dseed-43__ep-50__T-120__fast__seed-1",
+            "120",
+            "50",
+        ),
+    ],
+)
+def test_name_pattern_parses_the_trajectory_length_when_present(
+    cell_name: str, expected_length: str | None, expected_episodes: str | None
+):
+    fields = NAME_PATTERN.match(cell_name)
+
+    assert fields is not None
+    assert fields.group("trajectory_length") == expected_length
+    assert fields.group("num_episodes") == expected_episodes
+    assert fields.group("method") in {"fast", "binned"}
+
+
+@pytest.mark.unit
+def test_summarize_defaults_the_trajectory_length_for_unsuffixed_cells(
+    log_file_factory: Callable[..., Path],
+):
+    path = log_file_factory([_rollout_line(epoch=0, success=0.2)])
+
+    row = summarize(parse_log(path))
+
+    assert row["trajectory_length"] == 60
 
 
 @pytest.mark.unit
