@@ -15,7 +15,11 @@ from versatil.data.preprocessing.create_zarr_from_synthetic import (
     create_replay_buffer_from_synthetic,
 )
 from versatil.data.raw.schemas.custom.synthetic import SyntheticSchema
-from versatil.data.synthetic.constants import NoiseInjection, SyntheticTaskName
+from versatil.data.synthetic.constants import (
+    NoiseInjection,
+    SyntheticNoiseModel,
+    SyntheticTaskName,
+)
 
 
 def _default_zarr_array_specs(image_size: int) -> dict[str, dict]:
@@ -105,6 +109,7 @@ def mock_schema_factory(tmp_path: Path) -> Callable[..., MagicMock]:
         zarr_array_specs: dict[str, dict] | None = None,
         noise_smoothing_sigma: float = 0.0,
         noise_injection: str = NoiseInjection.POSITION.value,
+        noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
     ) -> MagicMock:
         schema = MagicMock(spec=SyntheticSchema)
         schema.zarr_path = str(tmp_path / "test.zarr")
@@ -119,6 +124,7 @@ def mock_schema_factory(tmp_path: Path) -> Callable[..., MagicMock]:
         schema.mode_weights = mode_weights
         schema.noise_smoothing_sigma = noise_smoothing_sigma
         schema.noise_injection = noise_injection
+        schema.noise_model = noise_model
         schema.get_zarr_array_specs.return_value = (
             zarr_array_specs
             if zarr_array_specs is not None
@@ -432,12 +438,16 @@ def test_create_replay_buffer_forwards_schema_params_to_save_visualization(
 
 
 @pytest.mark.unit
-def test_forwards_mode_weights_to_generator(
+def test_forwards_generation_options_to_generator(
     mock_schema_factory: Callable[..., MagicMock],
     fake_episode_factory: Callable[..., list[dict[str, np.ndarray]]],
 ):
     mode_weights = [0.7, 0.2, 0.1]
-    schema = mock_schema_factory(mode_weights=mode_weights)
+    noise_model = SyntheticNoiseModel.CABLE_HYSTERESIS.value
+    schema = mock_schema_factory(
+        mode_weights=mode_weights,
+        noise_model=noise_model,
+    )
     episodes = fake_episode_factory(num_episodes=2, trajectory_length=5)
 
     with (
@@ -452,3 +462,4 @@ def test_forwards_mode_weights_to_generator(
         create_replay_buffer_from_synthetic(schema=schema)
 
     assert mock_generate.call_args.kwargs["mode_weights"] == mode_weights
+    assert mock_generate.call_args.kwargs["noise_model"] == noise_model

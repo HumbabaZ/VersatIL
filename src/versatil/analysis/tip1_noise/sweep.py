@@ -44,7 +44,7 @@ from versatil.data.preprocessing.create_zarr_from_synthetic import (
     create_replay_buffer_from_synthetic,
 )
 from versatil.data.preprocessing.replay_buffer import ReplayBuffer
-from versatil.data.synthetic.constants import NoiseInjection
+from versatil.data.synthetic.constants import NoiseInjection, SyntheticNoiseModel
 
 # Noise is expressed as a multiple of each task's own default, because the tasks
 # differ severalfold in action magnitude and a shared absolute sigma would put
@@ -143,6 +143,25 @@ FAST_OVERRIDES = (
     f"task.dataloader.tokenization.action_tokenizer.max_token_len={FAST_MAX_TOKEN_LEN}",
 )
 
+# A targeted rate-distortion condition for cable hysteresis.  The continuous
+# oracle exactly reproduces the biased kinematics, whereas scale 0.2 retains
+# only the dominant low-frequency DCT components and reconstructs the clean path
+# closely enough to remain well within the clean endpoint
+# tolerance. 
+CABLE_HYSTERESIS_FAST_SCALE = 0.2
+CABLE_HYSTERESIS_COMMON_OVERRIDES = (
+    "task.prediction_horizon=59",
+    "task.dataloader.trailing_padded_actions=0",
+    "task.dataloader.num_workers=0",
+    "task.dataset_schema.num_rollouts=10",
+    "training.num_epochs=400",
+    "experiment.val_every=50",
+)
+CABLE_HYSTERESIS_FAST_OVERRIDES = (
+    "task.dataloader.tokenization.action_tokenizer.action_discretizer.scale="
+    f"{CABLE_HYSTERESIS_FAST_SCALE:g}",
+)
+
 BINNING_NUM_BINS = 64
 
 # A replicate index picks both the demonstration-noise draw and the training
@@ -187,6 +206,7 @@ class DataCell:
     injection: str
     smoothing_sigma: float
     sigma_multiplier: float
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value
     data_seed: int = 42
     num_episodes: int | None = None
 
@@ -198,6 +218,8 @@ class DataCell:
     @property
     def band(self) -> str:
         """Band label used in paths and reports."""
+        if self.noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value:
+            return "hysteresis"
         return "high" if self.smoothing_sigma <= 0.0 else "low"
 
     @property
@@ -207,10 +229,18 @@ class DataCell:
         ``num_episodes`` joins the name when it is overridden, so a smoke-test
         store can never be mistaken for the full one at the same noise setting.
         """
-        suffix = "" if self.num_episodes is None else f"__ep-{self.num_episodes}"
+        model_suffix = (
+            ""
+            if self.noise_model == SyntheticNoiseModel.GAUSSIAN.value
+            else f"__model-{self.noise_model}"
+        )
+        episode_suffix = (
+            "" if self.num_episodes is None else f"__ep-{self.num_episodes}"
+        )
         return (
             f"{self.task}__inj-{self.injection}__band-{self.band}"
-            f"__sig-{self.sigma_multiplier:g}__dseed-{self.data_seed}{suffix}"
+            f"__sig-{self.sigma_multiplier:g}__dseed-{self.data_seed}"
+            f"{model_suffix}{episode_suffix}"
         )
 
     @property
@@ -235,6 +265,7 @@ class DataCell:
             f"task.dataset_schema.noise_std={self.noise_std:g}",
             f"task.dataset_schema.noise_smoothing_sigma={self.smoothing_sigma:g}",
             f"task.dataset_schema.noise_injection={self.injection}",
+            f"task.dataset_schema.noise_model={self.noise_model}",
             f"task.dataset_schema.seed={self.data_seed}",
             *episode_override,
             # The rollout reference must not follow the training noise: it sets the
@@ -256,7 +287,12 @@ class TrainCell:
     @property
     def name(self) -> str:
         """Identifier extending the data cell with method and seed."""
-        return f"{self.data.name}__{self.method}__seed-{self.seed}"
+        experiment_name = f"{self.data.name}__{self.method}__seed-{self.seed}"
+        if self.data.noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value:
+            experiment_name += "__horizon-59__full-windows"
+            if self.method == "fast":
+                experiment_name += f"__fast-scale-{CABLE_HYSTERESIS_FAST_SCALE:g}"
+        return experiment_name
 
     def command(
         self, matched: bool, extra_overrides: tuple[str, ...] = ()
@@ -283,6 +319,10 @@ class TrainCell:
                 overrides += list(MATCHED_ACT_EXTRA)
         if self.method == "fast":
             overrides += list(FAST_OVERRIDES)
+        if self.data.noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value:
+            overrides += list(CABLE_HYSTERESIS_COMMON_OVERRIDES)
+            if self.method == "fast":
+                overrides += list(CABLE_HYSTERESIS_FAST_OVERRIDES)
         overrides += list(extra_overrides)
         return [
             sys.executable,
@@ -301,6 +341,7 @@ def _cells(
     multipliers: tuple[float, ...],
     methods: tuple[str, ...],
     replicates: tuple[int, ...],
+    noise_models: tuple[str, ...] = (SyntheticNoiseModel.GAUSSIAN.value,),
     num_episodes: int | None = None,
 ) -> list[TrainCell]:
     """Expand the axes into training cells, one replicate per noise realization.
@@ -313,8 +354,15 @@ def _cells(
     stay paired and the run count is unchanged.
     """
     train_cells = []
-    for task, injection, smoothing, multiplier, replicate in itertools.product(
-        tasks, injections, smoothings, multipliers, replicates
+    for (
+        task,
+        injection,
+        smoothing,
+        multiplier,
+        noise_model,
+        replicate,
+    ) in itertools.product(
+        tasks, injections, smoothings, multipliers, noise_models, replicates
     ):
         # At zero noise the band is a no-op, so only keep the high-band copy.
         if multiplier == 0.0 and smoothing != HIGH_BAND_SMOOTHING:
@@ -324,6 +372,7 @@ def _cells(
             injection=injection,
             smoothing_sigma=smoothing,
             sigma_multiplier=multiplier,
+            noise_model=noise_model,
             data_seed=DATA_SEEDS[replicate],
             num_episodes=num_episodes,
         )
@@ -336,6 +385,8 @@ def _cells(
 
 ACTION = NoiseInjection.ACTION.value
 POSITION = NoiseInjection.POSITION.value
+GAUSSIAN = SyntheticNoiseModel.GAUSSIAN.value
+CABLE_HYSTERESIS = SyntheticNoiseModel.CABLE_HYSTERESIS.value
 
 STAGES = {
     # Stage A: does the sigma grid span "no effect" to "collapse" at all?
@@ -492,12 +543,14 @@ STAGES = {
     # The primary comparison. On the multimodal tasks the continuous arm's
     # success tracked which modes it kept rather than how accurately it executed
     # under noise, so the estimand moves to the context-conditioned circle, where
-    # the mode is given and each arm is unimodal. The plain action transformer is
-    # a valid arm here because there is nothing to mode-average. Its reported
-    # number is conditional success: success on the route the context asked for.
+    # the mode is given and each arm is unimodal. Noise reaches training action
+    # labels only; positions and rendered observations stay on the clean path.
+    # The plain action transformer is a valid arm here because there is nothing
+    # to mode-average. Its reported number is conditional success: success on the
+    # route the context asked for.
     "final_conditional_s0": {
         "tasks": (CONDITIONAL_TASK,),
-        "injections": (POSITION,),
+        "injections": (ACTION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": (1.0, 2.0, 3.0, 4.0),
         "methods": FINAL_METHODS,
@@ -505,11 +558,39 @@ STAGES = {
     },
     "final_conditional": {
         "tasks": (CONDITIONAL_TASK,),
-        "injections": (POSITION,),
+        "injections": (ACTION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": (1.0, 2.0, 3.0, 4.0),
         "methods": FINAL_METHODS,
         "replicates": (0, 1, 2),
+    },
+    # One strong, systematic kinematic-error condition. The play operator models
+    # cable backlash: labels come from the lagged internal kinematic state while
+    # images and stored positions remain ground truth. Unlike independent
+    # Gaussian draws, this history-dependent error does not disappear by
+    # repeating the same demonstration.
+    "conditional_hysteresis_s0": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (ACTION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (4.0,),
+        "methods": FINAL_METHODS,
+        "replicates": (0,),
+        "noise_models": (CABLE_HYSTERESIS,),
+    },
+    # Deliberately targeted stress test, calibrated analytically before
+    # training. At threshold 0.080 the exact continuous label trajectory misses
+    # the clean endpoint, while FAST's scale-0.2 reconstruction remains inside the
+    # fixed clean-reference success radius. This stage tests that predicted
+    # model behavior at one setting; it is not an unbiased robustness sweep.
+    "conditional_hysteresis_fast_win_s0": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (ACTION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (10.0,),
+        "methods": ("fast", "qfat", "bcat"),
+        "replicates": (0,),
+        "noise_models": (CABLE_HYSTERESIS,),
     },
 }
 
@@ -617,6 +698,7 @@ def generate_cell(cell: DataCell) -> dict[str, float | str]:
         "cell": cell.name,
         "task": cell.task,
         "injection": cell.injection,
+        "noise_model": cell.noise_model,
         "band": cell.band,
         "sigma_multiplier": cell.sigma_multiplier,
         "noise_std": cell.noise_std,

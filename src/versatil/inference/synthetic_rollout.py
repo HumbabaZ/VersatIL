@@ -304,14 +304,14 @@ def evaluate_rollouts(
     num_styles: int = CORRIDOR_DEFAULT_NUM_STYLES,
     image_size: int = DEFAULT_IMAGE_SIZE,
     expected_mode_ids: np.ndarray | None = None,
+    endpoint_reach_threshold: float | None = None,
 ) -> dict[str, float | dict[int, int]]:
     """Evaluate rollout trajectories against regenerated expert demonstrations.
 
     Generates expert data with the given parameters, then computes
-    mode coverage and obstacle-aware success rate. The "reach" threshold
-    used by the synthetic success metrics is derived from the expert endpoint
-    spread (mean plus five standard deviations of distances from the per-mode
-    endpoint mean), so it scales with the task's intrinsic noise.
+    mode coverage and obstacle-aware success rate. By default, the "reach"
+    threshold is derived from expert endpoint dispersion. Callers can provide a
+    fixed threshold for tasks with an externally defined precision tolerance.
 
     Args:
         rollout_trajectories: Generated position trajectories.
@@ -328,6 +328,8 @@ def evaluate_rollouts(
             rollout was asked for, shape (num_rollouts,). Success alone accepts
             any mode's endpoint, so it cannot tell a policy that follows the
             context from one that ignores it; passing this adds that check.
+        endpoint_reach_threshold: Optional fixed Euclidean endpoint tolerance.
+            None uses the expert-derived threshold.
 
     Returns:
         Dict with raw mode coverage metrics, valid mode coverage metrics,
@@ -337,8 +339,14 @@ def evaluate_rollouts(
         the fraction that succeeded on the requested mode.
 
     Raises:
-        ValueError: If ``expected_mode_ids`` has one entry per rollout missing.
+        ValueError: If ``expected_mode_ids`` has one entry per rollout missing,
+            or if ``endpoint_reach_threshold`` is not positive.
     """
+    if endpoint_reach_threshold is not None and endpoint_reach_threshold <= 0.0:
+        raise ValueError(
+            "endpoint_reach_threshold must be positive when provided, got "
+            f"{endpoint_reach_threshold}."
+        )
     expert_episodes = generate_task_episodes(
         task_name=task_name,
         num_episodes=num_expert_episodes,
@@ -370,10 +378,14 @@ def evaluate_rollouts(
         expert_mode_ids=expert_mode_ids,
         num_modes=layout.num_modes,
     )
-    reach_threshold = _expert_endpoint_reach_threshold(
-        expert_trajectories=expert_trajectories,
-        expert_mode_ids=expert_mode_ids,
-        mode_endpoints=mode_endpoints,
+    reach_threshold = (
+        _expert_endpoint_reach_threshold(
+            expert_trajectories=expert_trajectories,
+            expert_mode_ids=expert_mode_ids,
+            mode_endpoints=mode_endpoints,
+        )
+        if endpoint_reach_threshold is None
+        else endpoint_reach_threshold
     )
     min_path_length = 0.5 * _expert_mean_path_length(
         expert_trajectories=expert_trajectories
@@ -405,6 +417,7 @@ def evaluate_rollouts(
     results["valid_mode_coverage"] = valid_coverage_results["mode_coverage"]
     results["valid_mode_entropy_ratio"] = valid_coverage_results["mode_entropy_ratio"]
     results.update(success_stats)
+    results["endpoint_reach_threshold"] = reach_threshold
     if expected_mode_ids is not None:
         num_rollouts = rollout_trajectories.shape[0]
         if expected_mode_ids.shape[0] != num_rollouts:

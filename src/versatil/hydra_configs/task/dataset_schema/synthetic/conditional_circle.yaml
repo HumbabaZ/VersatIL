@@ -12,5 +12,7 @@ image_size: 64
 num_modes: 2
 trajectory_length: 60
 noise_std: 0.008
+noise_model: ${synthetic_noise_model:GAUSSIAN}
 num_styles: 1
 num_rollouts: 200
+endpoint_reach_threshold: 0.025

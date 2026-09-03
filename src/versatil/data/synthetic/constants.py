@@ -30,6 +30,21 @@ class NoiseInjection(enum.StrEnum):
     ACTION = "action"
 
 
+class SyntheticNoiseModel(enum.StrEnum):
+    """Error processes available to synthetic trajectory generation.
+
+    ``GAUSSIAN`` is the existing stochastic benchmark noise. Depending on the
+    injection point, it perturbs positions or action labels with a controlled
+    temporal spectrum. ``CABLE_HYSTERESIS`` applies a rate-independent play
+    operator to the hidden kinematic measurement before action differencing.
+    It represents systematic backlash in a cable transmission and therefore
+    requires action-label injection.
+    """
+
+    GAUSSIAN = "gaussian"
+    CABLE_HYSTERESIS = "cable_hysteresis"
+
+
 DEFAULT_IMAGE_SIZE = 64
 DEFAULT_SEED = 42
 DEFAULT_NUM_EPISODES = 1000

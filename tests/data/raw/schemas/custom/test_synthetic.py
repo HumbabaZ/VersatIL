@@ -23,7 +23,11 @@ from versatil.data.raw.schemas.custom.synthetic import (
     SyntheticSchema,
 )
 from versatil.data.raw.zarr_meta import DatasetMetadata
-from versatil.data.synthetic.constants import SyntheticTaskName
+from versatil.data.synthetic.constants import (
+    NoiseInjection,
+    SyntheticNoiseModel,
+    SyntheticTaskName,
+)
 
 
 @pytest.fixture
@@ -91,6 +95,11 @@ def synthetic_schema_factory(
         num_styles: int = 6,
         mode_weights: list[float] | None = None,
         num_rollouts: int = 50,
+        noise_smoothing_sigma: float = 0.0,
+        noise_injection: str = NoiseInjection.POSITION.value,
+        noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+        eval_reference_noise_std: float | None = None,
+        endpoint_reach_threshold: float | None = None,
     ) -> SyntheticSchema:
         if zarr_path is None:
             zarr_path = str(tmp_path / "test.zarr")
@@ -110,6 +119,11 @@ def synthetic_schema_factory(
             num_styles=num_styles,
             mode_weights=mode_weights,
             num_rollouts=num_rollouts,
+            noise_smoothing_sigma=noise_smoothing_sigma,
+            noise_injection=noise_injection,
+            noise_model=noise_model,
+            eval_reference_noise_std=eval_reference_noise_std,
+            endpoint_reach_threshold=endpoint_reach_threshold,
         )
 
     return factory
@@ -137,6 +151,11 @@ class TestSyntheticSchemaInit:
         noise_std = 0.2
         num_styles = 8
         num_rollouts = 17
+        noise_smoothing_sigma = 2.0
+        noise_injection = NoiseInjection.ACTION.value
+        noise_model = SyntheticNoiseModel.GAUSSIAN.value
+        eval_reference_noise_std = 0.0
+        endpoint_reach_threshold = 0.025
         schema = synthetic_schema_factory(
             task_name=task_name,
             num_episodes=num_episodes,
@@ -148,6 +167,11 @@ class TestSyntheticSchemaInit:
             num_styles=num_styles,
             mode_weights=mode_weights,
             num_rollouts=num_rollouts,
+            noise_smoothing_sigma=noise_smoothing_sigma,
+            noise_injection=noise_injection,
+            noise_model=noise_model,
+            eval_reference_noise_std=eval_reference_noise_std,
+            endpoint_reach_threshold=endpoint_reach_threshold,
         )
         assert schema.task_name == task_name
         assert schema.num_episodes == num_episodes
@@ -159,6 +183,11 @@ class TestSyntheticSchemaInit:
         assert schema.num_styles == num_styles
         assert schema.mode_weights == mode_weights
         assert schema.num_rollouts == num_rollouts
+        assert schema.noise_smoothing_sigma == noise_smoothing_sigma
+        assert schema.noise_injection == noise_injection
+        assert schema.noise_model == noise_model
+        assert schema.eval_reference_noise_std == eval_reference_noise_std
+        assert schema.endpoint_reach_threshold == endpoint_reach_threshold
 
     @pytest.mark.parametrize(
         "dataset_type, expectation",
@@ -193,6 +222,63 @@ class TestSyntheticSchemaValidation:
         valid_synthetic_metadata: DatasetMetadata,
     ):
         SyntheticSchema._validate_metadata(valid_synthetic_metadata)
+
+    @pytest.mark.parametrize("endpoint_reach_threshold", [0.0, -0.01])
+    def test_endpoint_reach_threshold_must_be_positive(
+        self,
+        synthetic_schema_factory: Callable[..., SyntheticSchema],
+        endpoint_reach_threshold: float,
+    ):
+        with pytest.raises(
+            ValueError,
+            match="endpoint_reach_threshold must be positive when provided",
+        ):
+            synthetic_schema_factory(
+                endpoint_reach_threshold=endpoint_reach_threshold,
+            )
+
+    @pytest.mark.parametrize(
+        "noise_model, noise_injection, smoothing_sigma, expected_message",
+        [
+            (
+                "invalid_model",
+                NoiseInjection.ACTION.value,
+                0.0,
+                "Unknown noise_model 'invalid_model'. Expected one of "
+                f"{[member.value for member in SyntheticNoiseModel]}.",
+            ),
+            (
+                SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+                NoiseInjection.POSITION.value,
+                0.0,
+                "noise_model='cable_hysteresis' requires "
+                "noise_injection='action' so rendered positions remain the "
+                "ground-truth trajectory.",
+            ),
+            (
+                SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+                NoiseInjection.ACTION.value,
+                2.0,
+                "noise_smoothing_sigma must be 0 for "
+                "noise_model='cable_hysteresis'; the play operator defines "
+                "its own temporal structure.",
+            ),
+        ],
+    )
+    def test_invalid_noise_configuration_raises(
+        self,
+        synthetic_schema_factory: Callable[..., SyntheticSchema],
+        noise_model: str,
+        noise_injection: str,
+        smoothing_sigma: float,
+        expected_message: str,
+    ):
+        with pytest.raises(ValueError, match=re.escape(expected_message)):
+            synthetic_schema_factory(
+                noise_model=noise_model,
+                noise_injection=noise_injection,
+                noise_smoothing_sigma=smoothing_sigma,
+            )
 
     @pytest.mark.parametrize(
         "field_name, expected_message",
@@ -292,6 +378,7 @@ class TestGetCallbacks:
         assert callback.num_styles == schema.num_styles
         assert callback.trajectory_length == schema.trajectory_length
         assert callback.noise_std == schema.noise_std
+        assert callback.endpoint_reach_threshold == schema.endpoint_reach_threshold
 
     def test_base_dataset_schema_has_no_get_callbacks(self):
         assert not hasattr(DatasetSchema, "get_callbacks")

@@ -439,6 +439,7 @@ def test_evaluate_rollouts_truncates_and_calls_metrics_with_layout(
     )
     assert success_mask_kwargs["obstacles"] == layout.obstacles
     np.testing.assert_array_equal(success_mask_kwargs["mode_endpoints"], mode_endpoints)
+    assert results["endpoint_reach_threshold"] == success_mask_kwargs["goal_threshold"]
     mock_success_rates.assert_called_once_with(success_masks=success_masks)
     for stat_key, stat_value in success_stats.items():
         assert results[stat_key] == stat_value
@@ -847,6 +848,39 @@ def test_evaluate_rollouts_forwards_expert_mean_plus_five_std_endpoint_threshold
     distances = np.array(distance_values, dtype=np.float64)
     expected = float(distances.mean() + 5.0 * distances.std())
     assert forwarded == pytest.approx(expected, abs=1e-6)
+
+
+@pytest.mark.unit
+def test_evaluate_rollouts_uses_fixed_endpoint_reach_threshold(
+    rollout_trajectory_factory: Callable[..., np.ndarray],
+):
+    threshold = 0.025
+    results = evaluate_rollouts(
+        rollout_trajectories=rollout_trajectory_factory(num_timesteps=60),
+        task_name=SyntheticTaskName.CONDITIONAL_CIRCLE.value,
+        num_expert_episodes=4,
+        num_modes=2,
+        endpoint_reach_threshold=threshold,
+    )
+
+    assert results["endpoint_reach_threshold"] == threshold
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("endpoint_reach_threshold", [0.0, -0.01])
+def test_evaluate_rollouts_rejects_non_positive_endpoint_reach_threshold(
+    rollout_trajectory_factory: Callable[..., np.ndarray],
+    endpoint_reach_threshold: float,
+):
+    with pytest.raises(
+        ValueError,
+        match="endpoint_reach_threshold must be positive when provided",
+    ):
+        evaluate_rollouts(
+            rollout_trajectories=rollout_trajectory_factory(),
+            task_name=SyntheticTaskName.CIRCLE.value,
+            endpoint_reach_threshold=endpoint_reach_threshold,
+        )
 
 
 @pytest.mark.unit

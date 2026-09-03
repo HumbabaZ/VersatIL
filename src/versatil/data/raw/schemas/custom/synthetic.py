@@ -14,7 +14,11 @@ from versatil.data.constants import (
 )
 from versatil.data.raw.schemas.base import DatasetSchema
 from versatil.data.raw.zarr_meta import DatasetMetadata
-from versatil.data.synthetic.constants import NoiseInjection, SyntheticTaskName
+from versatil.data.synthetic.constants import (
+    NoiseInjection,
+    SyntheticNoiseModel,
+    SyntheticTaskName,
+)
 from versatil.training.callbacks.synthetic_rollout import SyntheticRolloutCallback
 
 ALLOWED_CAMERAS = {Cameras.AGENTVIEW.value}
@@ -51,7 +55,9 @@ class SyntheticSchema(DatasetSchema):
         num_rollouts: int = 200,
         noise_smoothing_sigma: float = 0.0,
         noise_injection: str = NoiseInjection.POSITION.value,
+        noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
         eval_reference_noise_std: float | None = None,
+        endpoint_reach_threshold: float | None = None,
     ):
         """Initialize and validate the synthetic benchmark schema.
 
@@ -65,7 +71,8 @@ class SyntheticSchema(DatasetSchema):
             image_size: Side length in pixels of rendered images (square).
             num_modes: Number of behavioral modes.
             trajectory_length: Number of timesteps per episode.
-            noise_std: Standard deviation of Gaussian trajectory noise.
+            noise_std: Gaussian standard deviation, or the play-operator
+                backlash threshold for cable hysteresis.
             num_styles: Number of sinusoidal style variations per corridor.
             mode_weights: Per-mode sampling weights. None for uniform.
             num_rollouts: Rollouts per evaluation in the training callback.
@@ -80,6 +87,10 @@ class SyntheticSchema(DatasetSchema):
                 clamping and rejection sampling move with it. ``action``
                 keeps positions and images clean and perturbs only the action
                 labels, isolating label-noise robustness.
+            noise_model: ``SyntheticNoiseModel`` value choosing the error
+                process. ``gaussian`` preserves the existing stochastic model.
+                ``cable_hysteresis`` applies systematic backlash to a hidden
+                kinematic measurement and requires action-label injection.
             eval_reference_noise_std: Noise level for the expert reference
                 episodes the rollout callback scores against. ``None``
                 (default) reuses ``noise_std``. Pin it when sweeping
@@ -87,6 +98,9 @@ class SyntheticSchema(DatasetSchema):
                 endpoint-reach threshold and the obstacle layout, so
                 letting it track the training noise would loosen the
                 success criterion exactly where performance should drop.
+            endpoint_reach_threshold: Optional fixed Euclidean distance from an
+                expert endpoint required for rollout success. ``None`` derives
+                the tolerance from the expert endpoint spread.
         """
         if dataset_type != DatasetType.SYNTHETIC.value:
             raise ValueError(
@@ -100,6 +114,35 @@ class SyntheticSchema(DatasetSchema):
                 f"{valid_injections}. Failing here rather than at generation "
                 "time catches a typo before a sweep spends compute on it."
             )
+        valid_noise_models = [member.value for member in SyntheticNoiseModel]
+        if noise_model not in valid_noise_models:
+            raise ValueError(
+                f"Unknown noise_model '{noise_model}'. Expected one of "
+                f"{valid_noise_models}."
+            )
+        if (
+            noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value
+            and noise_injection != NoiseInjection.ACTION.value
+        ):
+            raise ValueError(
+                "noise_model='cable_hysteresis' requires "
+                "noise_injection='action' so rendered positions remain the "
+                "ground-truth trajectory."
+            )
+        if (
+            noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value
+            and noise_smoothing_sigma != 0.0
+        ):
+            raise ValueError(
+                "noise_smoothing_sigma must be 0 for "
+                "noise_model='cable_hysteresis'; the play operator defines "
+                "its own temporal structure."
+            )
+        if endpoint_reach_threshold is not None and endpoint_reach_threshold <= 0.0:
+            raise ValueError(
+                "endpoint_reach_threshold must be positive when provided, got "
+                f"{endpoint_reach_threshold}."
+            )
         self.task_name = task_name
         self.num_episodes = num_episodes
         self.seed = seed
@@ -112,7 +155,9 @@ class SyntheticSchema(DatasetSchema):
         self.num_rollouts = num_rollouts
         self.noise_smoothing_sigma = noise_smoothing_sigma
         self.noise_injection = noise_injection
+        self.noise_model = noise_model
         self.eval_reference_noise_std = eval_reference_noise_std
+        self.endpoint_reach_threshold = endpoint_reach_threshold
         self._validate_metadata(metadata)
         super().__init__(
             zarr_path=zarr_path,
@@ -182,6 +227,7 @@ class SyntheticSchema(DatasetSchema):
                 num_rollouts=self.num_rollouts,
                 image_size=self.image_size,
                 log_every_n_epochs=experiment_config.val_every,
+                endpoint_reach_threshold=self.endpoint_reach_threshold,
             )
         ]
 

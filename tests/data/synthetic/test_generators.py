@@ -25,10 +25,12 @@ from versatil.data.synthetic.constants import (
     SEQUENTIAL_SECOND_BRANCH_X_DELTA,
     SEQUENTIAL_START,
     NoiseInjection,
+    SyntheticNoiseModel,
     SyntheticTaskName,
 )
 from versatil.data.synthetic.generators import (
     _add_noise_and_clamp,
+    _apply_cable_hysteresis,
     _apply_sinusoidal_style,
     _balanced_mode_counts,
     _build_trajectory_signals,
@@ -909,6 +911,17 @@ def test_parametric_circle_distance_from_center():
 
 
 @pytest.mark.unit
+def test_parametric_circle_includes_closed_endpoint():
+    center = np.array([0.5, 0.7], dtype=np.float32)
+
+    positions = _parametric_circle(
+        center=center, radius=0.2, num_points=60, clockwise=True
+    )
+
+    np.testing.assert_allclose(positions[-1], positions[0], atol=1e-6)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("num_gaps", [2, 4, 6])
 def test_compute_corridor_gap_centers_evenly_spaced(num_gaps: int):
     gap_centers = _compute_corridor_gap_centers(num_gaps=num_gaps)
@@ -1171,6 +1184,7 @@ def test_generate_task_episodes_dispatches_to_correct_generator(
             trajectory_length=10,
             noise_std=0.01,
             num_styles=2,
+            noise_model=SyntheticNoiseModel.GAUSSIAN.value,
         )
 
     assert result is mock_return_value
@@ -1190,6 +1204,7 @@ def test_generate_task_episodes_dispatches_to_correct_generator(
             assert call_kwargs["trajectory_length"] == 10
             assert call_kwargs["noise_std"] == 0.01
             assert call_kwargs["mode_weights"] is None
+            assert call_kwargs["noise_model"] == SyntheticNoiseModel.GAUSSIAN.value
             if target in ("_generate_radial", "_generate_corridor_navigation"):
                 assert call_kwargs["num_modes"] == 4
             if target == "_generate_corridor_navigation":
@@ -1310,6 +1325,98 @@ def test_sample_action_noise_consumes_one_draw_per_element(
 
 
 @pytest.mark.unit
+def test_apply_cable_hysteresis_follows_play_operator():
+    trajectory = np.array(
+        [
+            [0.00, 0.00],
+            [0.05, 0.00],
+            [0.10, 0.00],
+            [0.05, 0.00],
+            [0.00, 0.00],
+            [-0.05, 0.00],
+        ],
+        dtype=np.float32,
+    )
+    expected = np.array(
+        [
+            [0.00, 0.00],
+            [0.03, 0.00],
+            [0.08, 0.00],
+            [0.07, 0.00],
+            [0.02, 0.00],
+            [-0.03, 0.00],
+        ],
+        dtype=np.float32,
+    )
+
+    measured = _apply_cable_hysteresis(
+        trajectory=trajectory,
+        backlash_threshold=0.02,
+    )
+
+    np.testing.assert_allclose(measured, expected, atol=1e-7)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "trajectory, backlash_threshold, expected_message",
+    [
+        (
+            np.zeros((2, 2), dtype=np.float32),
+            -0.1,
+            "backlash_threshold must be non-negative, got -0.1.",
+        ),
+        (
+            np.zeros((0, 2), dtype=np.float32),
+            0.1,
+            "trajectory must be a non-empty two-dimensional array, got shape (0, 2).",
+        ),
+        (
+            np.zeros(2, dtype=np.float32),
+            0.1,
+            "trajectory must be a non-empty two-dimensional array, got shape (2,).",
+        ),
+    ],
+)
+def test_apply_cable_hysteresis_rejects_invalid_input(
+    trajectory: np.ndarray,
+    backlash_threshold: float,
+    expected_message: str,
+):
+    with pytest.raises(ValueError, match=re.escape(expected_message)):
+        _apply_cable_hysteresis(
+            trajectory=trajectory,
+            backlash_threshold=backlash_threshold,
+        )
+
+
+@pytest.mark.unit
+def test_build_trajectory_signals_derives_labels_from_hysteretic_measurement(
+    rng: np.random.Generator,
+):
+    trajectory = _interpolate_waypoints(
+        waypoints=[(0.2, 0.1), (0.8, 0.9), (0.2, 0.1)], num_points=20
+    )
+    measured = _apply_cable_hysteresis(
+        trajectory=trajectory,
+        backlash_threshold=0.05,
+    )
+
+    positions, actions = _build_trajectory_signals(
+        trajectory=trajectory,
+        noise_std=0.05,
+        noise_smoothing_sigma=0.0,
+        noise_injection=NoiseInjection.ACTION.value,
+        noise_model=SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+        random_generator=rng,
+    )
+
+    np.testing.assert_allclose(positions, trajectory, atol=1e-6)
+    np.testing.assert_allclose(actions, _compute_actions(measured), atol=1e-6)
+    assert not np.allclose(actions, _compute_actions(positions))
+
+
+@pytest.mark.unit
 def test_build_trajectory_signals_leaves_positions_clean_for_action_noise(
     rng: np.random.Generator,
 ):
@@ -1344,5 +1451,52 @@ def test_build_trajectory_signals_rejects_unknown_injection(
             noise_std=0.01,
             noise_smoothing_sigma=0.0,
             noise_injection="somewhere_else",
+            random_generator=rng,
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "noise_model, noise_injection, smoothing_sigma, expected_message",
+    [
+        (
+            "invalid_model",
+            NoiseInjection.ACTION.value,
+            0.0,
+            "Unknown noise_model 'invalid_model'. Expected one of "
+            f"{[member.value for member in SyntheticNoiseModel]}.",
+        ),
+        (
+            SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+            NoiseInjection.POSITION.value,
+            0.0,
+            "noise_model='cable_hysteresis' requires noise_injection='action'.",
+        ),
+        (
+            SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+            NoiseInjection.ACTION.value,
+            2.0,
+            "noise_smoothing_sigma must be 0 for noise_model='cable_hysteresis'.",
+        ),
+    ],
+)
+def test_build_trajectory_signals_rejects_invalid_noise_configuration(
+    rng: np.random.Generator,
+    noise_model: str,
+    noise_injection: str,
+    smoothing_sigma: float,
+    expected_message: str,
+):
+    trajectory = _interpolate_waypoints(
+        waypoints=[(0.2, 0.1), (0.8, 0.9)], num_points=10
+    )
+
+    with pytest.raises(ValueError, match=re.escape(expected_message)):
+        _build_trajectory_signals(
+            trajectory=trajectory,
+            noise_std=0.01,
+            noise_smoothing_sigma=smoothing_sigma,
+            noise_injection=noise_injection,
+            noise_model=noise_model,
             random_generator=rng,
         )

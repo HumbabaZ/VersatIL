@@ -23,6 +23,7 @@ def callback_factory() -> Callable[..., SyntheticRolloutCallback]:
         num_rollouts: int = 10,
         image_size: int = 32,
         log_every_n_epochs: int = 1,
+        endpoint_reach_threshold: float | None = None,
     ) -> SyntheticRolloutCallback:
         return SyntheticRolloutCallback(
             task_name=task_name,
@@ -34,6 +35,7 @@ def callback_factory() -> Callable[..., SyntheticRolloutCallback]:
             num_rollouts=num_rollouts,
             image_size=image_size,
             log_every_n_epochs=log_every_n_epochs,
+            endpoint_reach_threshold=endpoint_reach_threshold,
         )
 
     return factory
@@ -66,6 +68,7 @@ def fake_results_factory() -> Callable[..., dict]:
         collision_rate: float = 0.1,
         endpoint_reach_rate: float = 0.85,
         path_length_rate: float = 0.9,
+        endpoint_reach_threshold: float = 0.1,
     ) -> dict:
         return {
             "mode_coverage": mode_coverage,
@@ -79,6 +82,7 @@ def fake_results_factory() -> Callable[..., dict]:
             "collision_rate": collision_rate,
             "endpoint_reach_rate": endpoint_reach_rate,
             "path_length_rate": path_length_rate,
+            "endpoint_reach_threshold": endpoint_reach_threshold,
         }
 
     return factory
@@ -139,12 +143,14 @@ def test_stores_configuration(
         num_rollouts=num_rollouts,
         image_size=image_size,
         log_every_n_epochs=log_every_n_epochs,
+        endpoint_reach_threshold=0.025,
     )
     assert callback.task_name == task_name
     assert callback.zarr_path == zarr_path
     assert callback.num_rollouts == num_rollouts
     assert callback.image_size == image_size
     assert callback.log_every_n_epochs == log_every_n_epochs
+    assert callback.endpoint_reach_threshold == 0.025
 
 
 @pytest.mark.unit
@@ -325,6 +331,7 @@ def test_calls_evaluate_rollouts_with_correct_args(
         trajectory_length=callback.trajectory_length,
         noise_std=callback.noise_std,
         expected_mode_ids=None,
+        endpoint_reach_threshold=callback.endpoint_reach_threshold,
     )
 
 
@@ -466,6 +473,7 @@ def test_logs_coverage_metrics_to_wandb(
         "collision_rate": 0.1,
         "endpoint_reach_rate": 0.6,
         "path_length_rate": 0.7,
+        "endpoint_reach_threshold": 0.025,
     }
     patches = _patch_callback_dependencies(
         fake_trajectories=fake_trajectories_factory(),
@@ -486,6 +494,7 @@ def test_logs_coverage_metrics_to_wandb(
     assert logged["synthetic/mode_entropy_ratio"] == entropy_ratio
     assert logged["synthetic/valid_mode_coverage"] == valid_mode_coverage
     assert logged["synthetic/valid_mode_entropy_ratio"] == valid_entropy_ratio
+    assert logged["synthetic/endpoint_reach_threshold"] == 0.025
     for mode_index, count in per_mode_count.items():
         assert logged[f"synthetic/mode_{mode_index}_count"] == count
     assert trainer.logger.log_metrics.call_args.kwargs["step"] == 5
