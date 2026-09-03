@@ -413,6 +413,25 @@ def test_generate_circle_episode_shape_and_keys(
 
 
 @pytest.mark.unit
+def test_generate_conditional_circle_skips_image_rendering_when_disabled():
+    with patch("versatil.data.synthetic.generators.render_episode") as mock_render:
+        episodes = generate_task_episodes(
+            task_name=SyntheticTaskName.CONDITIONAL_CIRCLE.value,
+            num_episodes=2,
+            seed=42,
+            image_size=8,
+            trajectory_length=10,
+            noise_std=0.0,
+            render_images=False,
+        )
+
+    mock_render.assert_not_called()
+    assert len(episodes) == 2
+    for episode in episodes:
+        assert set(episode) == EPISODE_KEYS - {"image"}
+
+
+@pytest.mark.unit
 def test_generate_circle_mode_balance(
     fake_render_episode_factory: Callable[..., Callable[..., np.ndarray]],
 ):
