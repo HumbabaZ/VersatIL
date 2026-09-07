@@ -700,13 +700,37 @@ STAGES = {
         "methods": FINAL_METHODS,
         "replicates": (0, 1, 2),
     },
+    # The stochastic error source: surgeon-side physiological tremor. Position
+    # injection is its physical model -- the demonstrated trajectory itself
+    # shakes, so the rendered observations carry the noise and differencing
+    # makes the action noise high-frequency by construction. This is a separate
+    # estimand from the stages above (per-method G(sigma) under world noise),
+    # not a control for the hysteresis condition, so it does not need to share
+    # that condition's injection point. The generation parameters match the
+    # stores prepared for the original position-injection comparison, so the
+    # existing stores are reused and no data is generated.
+    "tremor_conditional_s0": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": FINAL_METHODS,
+        "replicates": (0,),
+    },
+    "tremor_conditional": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (POSITION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (1.0, 2.0, 3.0, 4.0),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+    },
     # The control-rate axis: the same loop sampled 2x and 4x denser at the
     # anchor noise, with noise_std scaled down to hold the per-step SNR. This is
     # the regime FAST's own claim is about (a high control rate makes per-step
     # binning long and low-information), separate from the noise axis above.
-    # Action injection, matching the stages above: every Tip 1 stage now injects
-    # at the same point, so the noise model is the only thing that varies
-    # between the Gaussian control and the hysteresis condition.
+    # Action injection, matching the Gaussian control and hysteresis stages, so
+    # the noise model is the only thing that varies between them.
     # The first four cells coincide with final_conditional_s0's sigma=1 cells,
     # so a submission that already has those starts at index 4.
     "rate_conditional_s0": {

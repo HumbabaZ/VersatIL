@@ -479,6 +479,30 @@ def test_existing_stages_keep_the_default_length(noisy_store_root: Path):
 
 
 @pytest.mark.unit
+def test_tremor_stage_reuses_the_position_injection_stores(noisy_store_root: Path):
+    """The tremor stage must address the stores the original position-injection
+    comparison already generated, name for name, or it silently regenerates data.
+    """
+    cells = stage_cells("tremor_conditional_s0")
+
+    assert len(cells) == 16
+    assert all(cell.data.injection == POSITION for cell in cells)
+    assert {data.name for data in data_cells(cells)} == {
+        f"conditional__inj-position__band-high__sig-{sigma}__dseed-42"
+        for sigma in (1, 2, 3, 4)
+    }
+
+
+@pytest.mark.unit
+def test_tremor_replicates_extend_the_single_seed_stage(noisy_store_root: Path):
+    single = {cell.name for cell in stage_cells("tremor_conditional_s0")}
+    full = {cell.name for cell in stage_cells("tremor_conditional")}
+
+    assert single <= full
+    assert len(full) == 48
+
+
+@pytest.mark.unit
 def test_reference_cells_keep_the_trajectory_length(
     noisy_store_root: Path, data_cell_factory: Callable[..., DataCell]
 ):
