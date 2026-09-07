@@ -202,7 +202,7 @@ from versatil.data.constants import (
     TokenizerType,
     TokenPaddingStrategy,
 )
-from versatil.data.synthetic.constants import SyntheticTaskName
+from versatil.data.synthetic.constants import SyntheticNoiseModel, SyntheticTaskName
 from versatil.metrics.constants import MetadataKey
 from versatil.metrics.kernels import KernelType
 from versatil.models.adaptation.constants import LoRATargetModulePreset
@@ -600,6 +600,10 @@ def register_resolvers():
     if not OmegaConf.has_resolver("synthetic_task"):
         OmegaConf.register_resolver(
             "synthetic_task", lambda name: SyntheticTaskName[name].value
+        )
+    if not OmegaConf.has_resolver("synthetic_noise_model"):
+        OmegaConf.register_resolver(
+            "synthetic_noise_model", lambda name: SyntheticNoiseModel[name].value
         )
     if not OmegaConf.has_resolver("synthetic_obs_key"):
         OmegaConf.register_resolver(

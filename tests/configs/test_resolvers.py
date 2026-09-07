@@ -26,6 +26,7 @@ from versatil.data.constants import (
     RawCameraKey,
     TokenizerType,
 )
+from versatil.data.synthetic.constants import SyntheticNoiseModel
 from versatil.metrics.constants import MetadataKey
 from versatil.metrics.kernels import KernelType
 from versatil.models.adaptation.constants import LoRATargetModulePreset
@@ -124,6 +125,11 @@ ENUM_RESOLVER_CASES = [
     ("timestep_sampler", "UNIFORM", TimestepSampler.UNIFORM.value),
     ("dataset_type", "LIBERO", DatasetType.LIBERO.value),
     ("kernel_type", "RBF", KernelType.RBF.value),
+    (
+        "synthetic_noise_model",
+        "CABLE_HYSTERESIS",
+        SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+    ),
 ]
 
 

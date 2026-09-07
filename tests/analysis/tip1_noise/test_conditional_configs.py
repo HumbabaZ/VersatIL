@@ -27,6 +27,7 @@ from versatil.data.synthetic.constants import SyntheticTaskName
 CONTEXT_COLUMN_KEYS = ["c0", "c1", "c2"]
 LONG_TRAJECTORY_LENGTH = 240
 LONG_FAST_CAP = 512
+CONDITIONAL_CIRCLE_ENDPOINT_REACH_THRESHOLD = 0.025
 
 
 def _compose(method: str) -> DictConfig:
@@ -59,6 +60,10 @@ def test_conditional_config_feeds_context_to_the_decoder(method: str):
     )
     assert "context" in config.policy.encoding_pipeline.encoders
     assert "context_proprio" in config.policy.decoder.input_keys
+    assert (
+        config.task.dataset_schema.endpoint_reach_threshold
+        == CONDITIONAL_CIRCLE_ENDPOINT_REACH_THRESHOLD
+    )
 
 
 @pytest.mark.integration
@@ -117,3 +122,11 @@ def test_long_trajectory_overrides_reach_every_length_dependent_field(
         assert tokenizer.max_token_len == (480 if method == "binned" else LONG_FAST_CAP)
     elif method == "qfat":
         assert config.policy.decoder.max_seq_len == 512
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("method", ["fast", "binned"])
+def test_conditional_tokenized_configs_use_greedy_decoding(method: str):
+    config = _compose(method)
+
+    assert config.policy.decoder.deterministic is True

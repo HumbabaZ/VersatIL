@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
 import torch
-import wandb
 from pytorch_lightning.callbacks import Callback
 
+import wandb
 from versatil.data.constants import ProprioKey, SyntheticObsKey
 from versatil.data.preprocessing.replay_buffer import ReplayBuffer
 from versatil.data.synthetic.task_layout import get_task_layout
@@ -43,6 +43,8 @@ class SyntheticRolloutCallback(Callback):
         num_rollouts: Number of rollout trajectories per evaluation.
         image_size: Side length for rendered observation images.
         log_every_n_epochs: Evaluate every N epochs.
+        endpoint_reach_threshold: Optional fixed Euclidean endpoint tolerance.
+            None derives the tolerance from expert endpoint dispersion.
     """
 
     def __init__(
@@ -56,6 +58,7 @@ class SyntheticRolloutCallback(Callback):
         num_rollouts: int = 50,
         image_size: int = 64,
         log_every_n_epochs: int = 1,
+        endpoint_reach_threshold: float | None = None,
     ):
         """Initialize rollout generation and logging parameters."""
         super().__init__()
@@ -68,6 +71,7 @@ class SyntheticRolloutCallback(Callback):
         self.num_rollouts = num_rollouts
         self.image_size = image_size
         self.log_every_n_epochs = log_every_n_epochs
+        self.endpoint_reach_threshold = endpoint_reach_threshold
         self._training_data_logged = False
 
     def on_train_epoch_end(
@@ -138,6 +142,7 @@ class SyntheticRolloutCallback(Callback):
                 trajectory_length=self.trajectory_length,
                 noise_std=self.noise_std,
                 expected_mode_ids=expected_mode_ids,
+                endpoint_reach_threshold=self.endpoint_reach_threshold,
             )
         except Exception:
             logging.warning(
@@ -159,6 +164,7 @@ class SyntheticRolloutCallback(Callback):
         collision_rate = results["collision_rate"]
         endpoint_reach_rate = results["endpoint_reach_rate"]
         path_length_rate = results["path_length_rate"]
+        endpoint_reach_threshold = results["endpoint_reach_threshold"]
 
         log_parts = [
             f"epoch {epoch}",
@@ -171,6 +177,7 @@ class SyntheticRolloutCallback(Callback):
             f"raw_mode_coverage={mode_coverage:.2f}",
             f"raw_entropy={entropy_ratio:.2f}",
             f"per_mode={per_mode}",
+            f"endpoint_threshold={endpoint_reach_threshold:.4f}",
         ]
         has_context_metrics = "context_accuracy" in results
         if has_context_metrics:
@@ -185,6 +192,7 @@ class SyntheticRolloutCallback(Callback):
                 "synthetic/success_rate": success_rate,
                 "synthetic/collision_rate": collision_rate,
                 "synthetic/endpoint_reach_rate": endpoint_reach_rate,
+                "synthetic/endpoint_reach_threshold": endpoint_reach_threshold,
                 "synthetic/path_length_rate": path_length_rate,
                 "synthetic/valid_mode_coverage": valid_mode_coverage,
                 "synthetic/valid_mode_entropy_ratio": valid_entropy_ratio,

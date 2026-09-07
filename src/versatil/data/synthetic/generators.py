@@ -43,6 +43,7 @@ from versatil.data.synthetic.constants import (
     SEQUENTIAL_SECOND_BRANCH_X_DELTA,
     SEQUENTIAL_START,
     NoiseInjection,
+    SyntheticNoiseModel,
     SyntheticTaskName,
 )
 from versatil.data.synthetic.renderer import render_episode
@@ -127,6 +128,8 @@ def generate_task_episodes(
     mode_weights: list[float] | None = None,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """Generate synthetic episodes for a given task.
 
@@ -141,8 +144,8 @@ def generate_task_episodes(
         num_modes: Number of distinct behavioral modes for tasks that
             accept a variable mode count (radial, corridor_navigation).
         trajectory_length: Number of timesteps per episode.
-        noise_std: Standard deviation of Gaussian noise added to
-            trajectory positions for intra-mode variance.
+        noise_std: Gaussian standard deviation, or the play-operator backlash
+            threshold when ``noise_model`` is cable hysteresis.
         num_styles: Number of sinusoidal trajectory styles per corridor
             (corridor_navigation task only).
         mode_weights: Relative weights per mode for imbalanced generation.
@@ -160,10 +163,17 @@ def generate_task_episodes(
             ``action`` leaves positions and images clean and perturbs only the
             action labels, at the same action-noise power. See
             :func:`_sample_action_noise`.
+        noise_model: ``SyntheticNoiseModel`` value selecting the error process.
+            ``gaussian`` preserves the stochastic spectral model.
+            ``cable_hysteresis`` applies a systematic play operator to a hidden
+            kinematic measurement and requires action-label injection.
+        render_images: Whether to render and include the image sequence. Metric
+            code that only consumes trajectories can disable this expensive step.
 
     Returns:
         List of episode dicts. Each dict contains:
-            "image": rendered top-down RGB, shape (T, image_size, image_size, 3), uint8
+            "image": rendered top-down RGB, shape (T, image_size, image_size, 3),
+                uint8, when ``render_images`` is True
             "position": Cartesian (x, y) states, shape (T, 2), float32
             "action": delta (dx, dy) commands, shape (T, 2), float32
             "mode_id": ground-truth mode label, shape (T, 1), uint8
@@ -193,6 +203,8 @@ def generate_task_episodes(
         mode_weights=mode_weights,
         noise_smoothing_sigma=noise_smoothing_sigma,
         noise_injection=noise_injection,
+        noise_model=noise_model,
+        render_images=render_images,
     )
     shuffle_generator.shuffle(episodes)
     return episodes
@@ -210,6 +222,8 @@ def _generate_task_episodes_unshuffled(
     mode_weights: list[float] | None,
     noise_smoothing_sigma: float,
     noise_injection: str,
+    noise_model: str,
+    render_images: bool,
 ) -> list[dict[str, np.ndarray]]:
     """Dispatch to the task generator; episode order still reflects the mode loop.
 
@@ -227,6 +241,8 @@ def _generate_task_episodes_unshuffled(
                 mode_weights=mode_weights,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
+                render_images=render_images,
             )
         case SyntheticTaskName.CONDITIONAL_CIRCLE.value:
             return _generate_conditional_circle(
@@ -238,6 +254,8 @@ def _generate_task_episodes_unshuffled(
                 mode_weights=mode_weights,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
+                render_images=render_images,
             )
         case SyntheticTaskName.SEQUENTIAL_DECISION.value:
             return _generate_sequential_decision(
@@ -249,6 +267,8 @@ def _generate_task_episodes_unshuffled(
                 mode_weights=mode_weights,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
+                render_images=render_images,
             )
         case SyntheticTaskName.RADIAL.value:
             return _generate_radial(
@@ -261,6 +281,8 @@ def _generate_task_episodes_unshuffled(
                 mode_weights=mode_weights,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
+                render_images=render_images,
             )
         case SyntheticTaskName.CORRIDOR_NAVIGATION.value:
             return _generate_corridor_navigation(
@@ -274,6 +296,8 @@ def _generate_task_episodes_unshuffled(
                 mode_weights=mode_weights,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
+                render_images=render_images,
             )
         case _:
             raise ValueError(f"Unknown synthetic task: {task_name}")
@@ -288,6 +312,8 @@ def _generate_circle(
     mode_weights: list[float] | None,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """Traverse one of two tangent circles as a closed loop.
 
@@ -304,6 +330,8 @@ def _generate_circle(
         mode_weights=mode_weights,
         noise_smoothing_sigma=noise_smoothing_sigma,
         noise_injection=noise_injection,
+        noise_model=noise_model,
+        render_images=render_images,
         use_context=False,
     )
 
@@ -317,6 +345,8 @@ def _generate_conditional_circle(
     mode_weights: list[float] | None,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """Same layout as circle but with a one-hot context signal per mode.
 
@@ -332,6 +362,8 @@ def _generate_conditional_circle(
         mode_weights=mode_weights,
         noise_smoothing_sigma=noise_smoothing_sigma,
         noise_injection=noise_injection,
+        noise_model=noise_model,
+        render_images=render_images,
         use_context=True,
     )
 
@@ -346,6 +378,8 @@ def _generate_circle_episodes(
     use_context: bool,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """Shared implementation for circle and conditional_circle tasks.
 
@@ -382,13 +416,8 @@ def _generate_circle_episodes(
                 noise_std=noise_std,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
                 random_generator=random_generator,
-            )
-            images = render_episode(
-                positions=positions,
-                obstacles=CIRCLE_OBSTACLES,
-                image_size=image_size,
-                context_color=context_color,
             )
             if use_context:
                 context_vector = np.zeros(num_modes, dtype=np.float32)
@@ -397,15 +426,20 @@ def _generate_circle_episodes(
             else:
                 context = np.zeros((trajectory_length, num_modes), dtype=np.float32)
             mode_label = np.full((trajectory_length, 1), mode_index, dtype=np.uint8)
-            episodes.append(
-                {
-                    "image": images,
-                    "position": positions,
-                    "action": actions,
-                    "mode_id": mode_label,
-                    "context": context,
-                }
-            )
+            episode = {
+                "position": positions,
+                "action": actions,
+                "mode_id": mode_label,
+                "context": context,
+            }
+            if render_images:
+                episode["image"] = render_episode(
+                    positions=positions,
+                    obstacles=CIRCLE_OBSTACLES,
+                    image_size=image_size,
+                    context_color=context_color,
+                )
+            episodes.append(episode)
     return episodes
 
 
@@ -418,6 +452,8 @@ def _generate_sequential_decision(
     mode_weights: list[float] | None,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """Navigate upward from (0.5, 0) with two sequential left/right forks.
 
@@ -475,24 +511,24 @@ def _generate_sequential_decision(
                 noise_std=noise_std,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
                 random_generator=random_generator,
-            )
-            images = render_episode(
-                positions=positions,
-                obstacles=SEQUENTIAL_OBSTACLES,
-                image_size=image_size,
             )
             context = np.zeros((trajectory_length, compound_modes), dtype=np.float32)
             mode_label = np.full((trajectory_length, 1), mode_index, dtype=np.uint8)
-            episodes.append(
-                {
-                    "image": images,
-                    "position": positions,
-                    "action": actions,
-                    "mode_id": mode_label,
-                    "context": context,
-                }
-            )
+            episode = {
+                "position": positions,
+                "action": actions,
+                "mode_id": mode_label,
+                "context": context,
+            }
+            if render_images:
+                episode["image"] = render_episode(
+                    positions=positions,
+                    obstacles=SEQUENTIAL_OBSTACLES,
+                    image_size=image_size,
+                )
+            episodes.append(episode)
     return episodes
 
 
@@ -506,6 +542,8 @@ def _generate_radial(
     mode_weights: list[float] | None,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """K straight-line trajectories from center to K evenly-spaced points on a circle.
 
@@ -549,26 +587,26 @@ def _generate_radial(
                 noise_std=noise_std,
                 noise_smoothing_sigma=noise_smoothing_sigma,
                 noise_injection=noise_injection,
+                noise_model=noise_model,
                 random_generator=random_generator,
                 obstacles=obstacles,
                 rejection_stats=rejection_stats,
             )
-            images = render_episode(
-                positions=positions,
-                obstacles=obstacles,
-                image_size=image_size,
-            )
             context = np.zeros((trajectory_length, num_modes), dtype=np.float32)
             mode_label = np.full((trajectory_length, 1), mode_index, dtype=np.uint8)
-            episodes.append(
-                {
-                    "image": images,
-                    "position": positions,
-                    "action": actions,
-                    "mode_id": mode_label,
-                    "context": context,
-                }
-            )
+            episode = {
+                "position": positions,
+                "action": actions,
+                "mode_id": mode_label,
+                "context": context,
+            }
+            if render_images:
+                episode["image"] = render_episode(
+                    positions=positions,
+                    obstacles=obstacles,
+                    image_size=image_size,
+                )
+            episodes.append(episode)
     rejection_stats.log_summary(
         task_name=SyntheticTaskName.RADIAL.value, noise_std=noise_std
     )
@@ -586,6 +624,8 @@ def _generate_corridor_navigation(
     mode_weights: list[float] | None,
     noise_smoothing_sigma: float = 0.0,
     noise_injection: str = NoiseInjection.POSITION.value,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
+    render_images: bool = True,
 ) -> list[dict[str, np.ndarray]]:
     """Navigate through one of K gaps in a vertical wall, with S style variations.
 
@@ -639,28 +679,28 @@ def _generate_corridor_navigation(
                     noise_std=noise_std,
                     noise_smoothing_sigma=noise_smoothing_sigma,
                     noise_injection=noise_injection,
+                    noise_model=noise_model,
                     random_generator=random_generator,
                     obstacles=obstacles,
                     rejection_stats=rejection_stats,
-                )
-                images = render_episode(
-                    positions=positions,
-                    obstacles=obstacles,
-                    image_size=image_size,
                 )
                 context = np.zeros((trajectory_length, total_modes), dtype=np.float32)
                 mode_label = np.full(
                     (trajectory_length, 1), flat_mode_index, dtype=np.uint8
                 )
-                episodes.append(
-                    {
-                        "image": images,
-                        "position": positions,
-                        "action": actions,
-                        "mode_id": mode_label,
-                        "context": context,
-                    }
-                )
+                episode = {
+                    "position": positions,
+                    "action": actions,
+                    "mode_id": mode_label,
+                    "context": context,
+                }
+                if render_images:
+                    episode["image"] = render_episode(
+                        positions=positions,
+                        obstacles=obstacles,
+                        image_size=image_size,
+                    )
+                episodes.append(episode)
     rejection_stats.log_summary(
         task_name=SyntheticTaskName.CORRIDOR_NAVIGATION.value, noise_std=noise_std
     )
@@ -691,7 +731,7 @@ def _parametric_circle(
     start_angle = np.arctan2(0.5 - float(center[1]), 0.5 - float(center[0]))
     direction = -1.0 if clockwise else 1.0
     theta = start_angle + direction * np.linspace(
-        0.0, 2.0 * np.pi, num_points, endpoint=False, dtype=np.float32
+        0.0, 2.0 * np.pi, num_points, endpoint=True, dtype=np.float32
     )
     x_positions = float(center[0]) + radius * np.cos(theta)
     y_positions = float(center[1]) + radius * np.sin(theta)
@@ -1003,12 +1043,60 @@ def _sample_action_noise(
     return shaped * (target_std / shaped_std)
 
 
+def _apply_cable_hysteresis(
+    trajectory: np.ndarray,
+    backlash_threshold: float,
+) -> np.ndarray:
+    """Apply an element-wise play operator to a kinematic trajectory.
+
+    The output remains unchanged while the input moves inside a deadband of
+    radius ``backlash_threshold`` around it. Once the input leaves that band,
+    the output follows the corresponding boundary. This produces the lag and
+    direction-dependent loop of a cable transmission with backlash.
+
+    Args:
+        trajectory: Ground-truth Cartesian positions with shape
+            ``(num_steps, num_dims)``.
+        backlash_threshold: Non-negative play-operator threshold in the same
+            units as the trajectory coordinates.
+
+    Returns:
+        History-dependent kinematic measurements with the input shape and
+        dtype.
+
+    Raises:
+        ValueError: If the threshold is negative or the trajectory is not a
+            non-empty two-dimensional array.
+    """
+    if backlash_threshold < 0.0:
+        raise ValueError(
+            f"backlash_threshold must be non-negative, got {backlash_threshold}."
+        )
+    if trajectory.ndim != 2 or trajectory.shape[0] == 0:
+        raise ValueError(
+            "trajectory must be a non-empty two-dimensional array, got "
+            f"shape {trajectory.shape}."
+        )
+
+    measured_trajectory = np.empty_like(trajectory)
+    measured_trajectory[0] = trajectory[0]
+    for step_index in range(1, trajectory.shape[0]):
+        lower_bound = trajectory[step_index] - backlash_threshold
+        upper_bound = trajectory[step_index] + backlash_threshold
+        measured_trajectory[step_index] = np.maximum(
+            lower_bound,
+            np.minimum(upper_bound, measured_trajectory[step_index - 1]),
+        )
+    return measured_trajectory
+
+
 def _build_trajectory_signals(
     trajectory: np.ndarray,
     noise_std: float,
     noise_smoothing_sigma: float,
     noise_injection: str,
     random_generator: np.random.Generator,
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value,
     obstacles: list[tuple[float, float, float, float]] | None = None,
     rejection_stats: _RejectionStats | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1016,11 +1104,15 @@ def _build_trajectory_signals(
 
     Args:
         trajectory: Deterministic Cartesian path, shape (num_steps, 2).
-        noise_std: Noise scale, interpreted per ``noise_injection``.
+        noise_std: Noise scale. For cable hysteresis this is the play-operator
+            backlash threshold.
         noise_smoothing_sigma: Gaussian temporal smoothing width in timesteps
             selecting the noise band; 0 is the high band.
         noise_injection: ``NoiseInjection`` value choosing the injection point.
         random_generator: NumPy random generator for reproducibility.
+        noise_model: ``SyntheticNoiseModel`` value choosing the error process.
+            Cable hysteresis interprets ``noise_std`` as the play-operator
+            backlash threshold rather than as a standard deviation.
         obstacles: Rectangles a position-noise trajectory must avoid. None
             skips rejection sampling.
         rejection_stats: Optional accumulator for rejection-sampling attempts.
@@ -1029,8 +1121,24 @@ def _build_trajectory_signals(
         Positions clamped to the unit square and their action labels.
 
     Raises:
-        ValueError: If ``noise_injection`` is not a known injection point.
+        ValueError: If the noise model or injection configuration is invalid.
     """
+    valid_noise_models = [member.value for member in SyntheticNoiseModel]
+    if noise_model not in valid_noise_models:
+        raise ValueError(
+            f"Unknown noise_model '{noise_model}'. Expected one of "
+            f"{valid_noise_models}."
+        )
+    if noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value:
+        if noise_injection != NoiseInjection.ACTION.value:
+            raise ValueError(
+                "noise_model='cable_hysteresis' requires noise_injection='action'."
+            )
+        if noise_smoothing_sigma != 0.0:
+            raise ValueError(
+                "noise_smoothing_sigma must be 0 for noise_model='cable_hysteresis'."
+            )
+
     if noise_injection == NoiseInjection.POSITION.value:
         if obstacles is None:
             positions = _add_noise_and_clamp(
@@ -1059,6 +1167,16 @@ def _build_trajectory_signals(
     # Positions, and therefore the rendered images and the obstacle geometry,
     # stay exactly as the deterministic task defines them; only the labels move.
     positions = np.clip(trajectory, 0.0, 1.0).astype(np.float32)
+    if noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value:
+        measured_positions = _apply_cable_hysteresis(
+            trajectory=positions,
+            backlash_threshold=noise_std,
+        )
+        actions = _compute_actions(measured_positions)
+        if rejection_stats is not None:
+            rejection_stats.record(attempts=1)
+        return positions, actions
+
     noise = _sample_action_noise(
         shape=positions.shape,
         noise_std=noise_std,

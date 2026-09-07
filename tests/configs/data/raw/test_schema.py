@@ -10,6 +10,7 @@ from versatil.configs.data.raw.schema import (
     LeRobotDatasetSchemaConfig,
     SyntheticDatasetSchemaConfig,
 )
+from versatil.data.synthetic.constants import SyntheticNoiseModel
 
 
 @pytest.mark.unit
@@ -70,6 +71,8 @@ def test_synthetic_schema_stores_configuration(
         num_styles=3,
         mode_weights=[0.6, 0.4],
         num_rollouts=50,
+        noise_model=SyntheticNoiseModel.CABLE_HYSTERESIS.value,
+        endpoint_reach_threshold=0.025,
     )
     assert config.task_name == "conditional_circle"
     assert config.num_episodes == num_episodes
@@ -81,3 +84,5 @@ def test_synthetic_schema_stores_configuration(
     assert config.num_styles == 3
     assert config.mode_weights == [0.6, 0.4]
     assert config.num_rollouts == 50
+    assert config.noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value
+    assert config.endpoint_reach_threshold == 0.025

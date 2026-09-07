@@ -72,6 +72,6 @@ policy:
     feedforward_dimension: 512
     dropout_rate: 0.2
     attention_dropout: 0.15
-    deterministic: false
+    deterministic: true
     learnable_temperature: false
     temperature: 1.0

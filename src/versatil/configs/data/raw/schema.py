@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from omegaconf import MISSING
 
 from versatil.configs.data.raw.zarr_meta import DatasetMetadataConfig
-from versatil.data.synthetic.constants import NoiseInjection
+from versatil.data.synthetic.constants import NoiseInjection, SyntheticNoiseModel
 
 
 @dataclass
@@ -61,7 +61,8 @@ class SyntheticDatasetSchemaConfig(DatasetSchemaConfig):
         image_size: Generated image side length in pixels.
         num_modes: Number of behavior modes in the trajectory distribution.
         trajectory_length: Timesteps per generated trajectory.
-        noise_std: Standard deviation of the trajectory noise.
+        noise_std: Gaussian standard deviation, or the play-operator backlash
+            threshold when ``noise_model`` is cable hysteresis.
         num_styles: Number of visual styles used for conditional variants.
         mode_weights: Sampling weight per behavior mode.
         num_rollouts: Rollouts sampled per mode when evaluating coverage metrics.
@@ -72,11 +73,16 @@ class SyntheticDatasetSchemaConfig(DatasetSchemaConfig):
             ``position`` perturbs the trajectory, so images, clamping and
             rejection sampling move with it; ``action`` keeps those clean and
             perturbs only the action labels.
+        noise_model: Error process used for the perturbation. Gaussian noise
+            supports either injection point. Cable hysteresis models systematic
+            backlash and requires action-label injection.
         eval_reference_noise_std: Noise level for the expert reference used by
             rollout evaluation. None reuses ``noise_std``. Pin it when sweeping
             noise: the reference sets the mode centroids, the success threshold
             and the radial obstacle geometry, so letting it follow the training
             noise loosens the bar exactly where performance should degrade.
+        endpoint_reach_threshold: Optional fixed Euclidean endpoint tolerance.
+            None derives the tolerance from the expert endpoint spread.
     """
 
     task_name: str = MISSING
@@ -91,7 +97,9 @@ class SyntheticDatasetSchemaConfig(DatasetSchemaConfig):
     num_rollouts: int = 200
     noise_smoothing_sigma: float = 0.0
     noise_injection: str = NoiseInjection.POSITION.value
+    noise_model: str = SyntheticNoiseModel.GAUSSIAN.value
     eval_reference_noise_std: float | None = None
+    endpoint_reach_threshold: float | None = None
 
 
 @dataclass
