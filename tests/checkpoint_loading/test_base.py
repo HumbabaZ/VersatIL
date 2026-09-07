@@ -1,12 +1,16 @@
 """Tests for versatil.checkpoint_loading.base module."""
 
 import io
+from unittest.mock import patch
 
 import pytest
 import torch
 from omegaconf import OmegaConf
 
-from versatil.checkpoint_loading.base import versatil_checkpoint_safe_globals
+from versatil.checkpoint_loading.base import (
+    BaseCheckpointLoader,
+    versatil_checkpoint_safe_globals,
+)
 from versatil.configs import TrainingConfig
 
 
@@ -46,3 +50,32 @@ class TestVersatilCheckpointSafeGlobals:
             pytest.raises(Exception, match="Weights only load failed"),
         ):
             torch.load(buffer, weights_only=True)
+
+
+@pytest.mark.unit
+class TestLoadConfigDeviceOverride:
+    def test_saved_device_entries_follow_the_loader_device(self, tmp_path) -> None:
+        config_path = tmp_path / "config.yaml"
+        OmegaConf.save(
+            OmegaConf.create(
+                {
+                    "experiment": {"device": "cuda"},
+                    "policy": {"device": "cuda", "decoder": {"device": "cuda"}},
+                    "task": {"name": "unit"},
+                }
+            ),
+            config_path,
+        )
+        loader = BaseCheckpointLoader(
+            device=torch.device("cpu"), checkpoint_path=str(tmp_path)
+        )
+        with (
+            patch("versatil.checkpoint_loading.base.hydra.utils.instantiate") as inst,
+            patch("versatil.checkpoint_loading.base.validate_experiment"),
+        ):
+            loader._load_config(config_path=str(config_path))
+
+        instantiated = inst.call_args.args[0]
+        assert instantiated.experiment.device == "cpu"
+        assert instantiated.policy.device == "cpu"
+        assert instantiated.policy.decoder.device == "cpu"

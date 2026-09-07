@@ -35,6 +35,30 @@ class TokenUsageSink(Protocol):
         """Record one prediction's model-vocab action token IDs."""
 
 
+@runtime_checkable
+class LatencySink(Protocol):
+    """Receives per-segment boundaries from ``Policy.predict_action``.
+
+    The policy only reports where each segment ends; clocks and device
+    synchronization live in the sink implementation, so the policy stays free
+    of timing logic. Segments are reported in order: ``pre`` (device transfer,
+    normalization, observation tokenization), ``encode`` (encoding pipeline),
+    ``generate`` (decoding-algorithm prediction, including the decoder's
+    prefix prefill), ``detok`` (token-to-action decoding; near zero for
+    continuous heads), ``unnorm`` (action unnormalization).
+    """
+
+    def start(self) -> None:
+        """Begin one prediction's measurement window."""
+
+    def mark(self, segment: str) -> None:
+        """Record that ``segment`` just finished."""
+
+    def finish(self, generated_tokens: int | None) -> None:
+        """Close the window; ``generated_tokens`` is the emitted action-token
+        count (EOS included) for tokenized heads, ``None`` for continuous."""
+
+
 def build_algorithm_features(
     observation: dict[str, torch.Tensor],
     encoding_pipeline: EncodingPipeline,
@@ -131,6 +155,7 @@ class Policy(nn.Module):
         self.tokenizer = None  # Set later via set_tokenizer()
         self.denoising_thresholds = DictOfTensorMixin()
         self._token_usage_sink: TokenUsageSink | None = None
+        self._latency_sink: LatencySink | None = None
 
     @property
     def input_keys(self) -> list[str]:
@@ -179,6 +204,14 @@ class Policy(nn.Module):
         tokenized-action prediction is forwarded to the sink before detokenizing.
         """
         self._token_usage_sink = sink
+
+    def set_latency_sink(self, sink: LatencySink | None) -> None:
+        """Attach a sink that receives segment timings from ``predict_action``.
+
+        Leaving the sink unset keeps inference untouched; when set, every
+        prediction reports its segment boundaries to the sink.
+        """
+        self._latency_sink = sink
 
     def set_denoising_thresholds(self, thresholds: dict[str, float]) -> None:
         """Set the denoising thresholds from training data.
@@ -396,6 +429,9 @@ class Policy(nn.Module):
         Returns:
             Predicted actions (on same device as policy)
         """
+        latency_sink = self._latency_sink
+        if latency_sink is not None:
+            latency_sink.start()
         obs_dict = to_device(obs_dict, device=self.device)
         normalized_observation = normalize_observation(
             observation=obs_dict,
@@ -414,10 +450,18 @@ class Policy(nn.Module):
                 obs_tokenizer=self.tokenizer.observation_tokenizer,
                 batched=True,
             )
+        if latency_sink is not None:
+            latency_sink.mark("pre")
         features = self._build_algorithm_features(observation=normalized_observation)
+        if latency_sink is not None:
+            latency_sink.mark("encode")
         predictions = self.algorithm.predict(features=features, network=self.decoder)
+        if latency_sink is not None:
+            latency_sink.mark("generate")
+        generated_tokens: int | None = None
         if DecoderOutputKey.PREDICTED_ACTION_TOKENS.value in predictions:
             action_tokens = predictions[DecoderOutputKey.PREDICTED_ACTION_TOKENS.value]
+            generated_tokens = int(action_tokens.shape[1])
             if self._token_usage_sink is not None:
                 self._token_usage_sink.record(action_tokens=action_tokens)
             if self.tokenizer is None or self.tokenizer.action_tokenizer is None:
@@ -432,9 +476,14 @@ class Policy(nn.Module):
             normalized_actions = to_device(normalized_actions, device=self.device)
         else:
             normalized_actions = predictions
+        if latency_sink is not None:
+            latency_sink.mark("detok")
         actions = unnormalize_actions(
             normalized_actions=normalized_actions,
             normalizer=self.normalizer,
             action_space=self.action_space,
         )
+        if latency_sink is not None:
+            latency_sink.mark("unnorm")
+            latency_sink.finish(generated_tokens=generated_tokens)
         return actions

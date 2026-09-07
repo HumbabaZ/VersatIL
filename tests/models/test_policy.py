@@ -981,6 +981,66 @@ class TestPredictAction:
     @patch("versatil.models.policy.unnormalize_actions")
     @patch("versatil.models.policy.normalize_observation")
     @patch("versatil.models.policy.to_device")
+    def test_latency_sink_receives_ordered_marks_for_continuous_head(
+        self,
+        mock_to_device,
+        mock_normalize,
+        mock_unnormalize,
+        policy_factory: Callable[..., Policy],
+        observation_dictionary_factory: Callable[..., dict[str, torch.Tensor]],
+    ):
+        observation = observation_dictionary_factory()
+        mock_to_device.side_effect = lambda x, device: x
+        mock_normalize.return_value = observation_dictionary_factory()
+        mock_unnormalize.return_value = {}
+        policy = policy_factory()
+        policy.algorithm.predict.return_value = {}
+        sink = MagicMock()
+        policy.set_latency_sink(sink=sink)
+
+        policy.predict_action(obs_dict=observation)
+
+        sink.start.assert_called_once()
+        marked_segments = [call.args[0] for call in sink.mark.call_args_list]
+        assert marked_segments == ["pre", "encode", "generate", "detok", "unnorm"]
+        sink.finish.assert_called_once_with(generated_tokens=None)
+
+    @patch("versatil.models.policy.unnormalize_actions")
+    @patch("versatil.models.policy.detokenize_actions")
+    @patch("versatil.models.policy.to_device")
+    @patch("versatil.models.policy.normalize_observation")
+    def test_latency_sink_reports_generated_tokens_for_tokenized_head(
+        self,
+        mock_normalize,
+        mock_to_device_function,
+        mock_detokenize,
+        mock_unnormalize,
+        policy_factory: Callable[..., Policy],
+        observation_dictionary_factory: Callable[..., dict[str, torch.Tensor]],
+    ):
+        observation = observation_dictionary_factory()
+        mock_normalize.return_value = observation
+        mock_to_device_function.side_effect = lambda x, device: x
+        mock_detokenize.return_value = {"position": torch.zeros(2, 4, 3)}
+        mock_unnormalize.return_value = {}
+        policy = policy_factory()
+        tokenizer = MagicMock(spec=Tokenizer)
+        tokenizer.observation_tokenizer = None
+        tokenizer.action_tokenizer = MagicMock()
+        policy.tokenizer = tokenizer
+        policy.algorithm.predict.return_value = {
+            DecoderOutputKey.PREDICTED_ACTION_TOKENS.value: torch.zeros(2, 17),
+        }
+        sink = MagicMock()
+        policy.set_latency_sink(sink=sink)
+
+        policy.predict_action(obs_dict=observation)
+
+        sink.finish.assert_called_once_with(generated_tokens=17)
+
+    @patch("versatil.models.policy.unnormalize_actions")
+    @patch("versatil.models.policy.normalize_observation")
+    @patch("versatil.models.policy.to_device")
     def test_skips_tokenization_when_observation_tokenizer_is_none(
         self,
         mock_to_device,

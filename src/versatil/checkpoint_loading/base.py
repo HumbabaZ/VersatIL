@@ -134,8 +134,16 @@ class BaseCheckpointLoader:
         self._config: MainConfig | None = None
         self._policy: Policy | None = None
 
+    # The saved config bakes in the training device; every entry must follow
+    # the loader's device so a checkpoint trained on CUDA loads on a CPU-only
+    # machine (modules would otherwise be constructed on the absent device).
+    CONFIG_DEVICE_KEYS = ("experiment.device", "policy.device", "policy.decoder.device")
+
     def _load_config(self, config_path: str) -> MainConfig:
         """Load and validate experiment configuration from YAML.
+
+        The device entries recorded at training time are overridden with the
+        loader's device before instantiation.
 
         Args:
             config_path: Path to the config.yaml file.
@@ -149,7 +157,12 @@ class BaseCheckpointLoader:
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Config file not found at {config_path}.")
         logging.info(f"Loading config from {config_path}")
-        config = hydra.utils.instantiate(OmegaConf.load(config_path))
+        raw_config = OmegaConf.load(config_path)
+        if isinstance(raw_config, DictConfig):
+            for device_key in self.CONFIG_DEVICE_KEYS:
+                if OmegaConf.select(raw_config, device_key) is not None:
+                    OmegaConf.update(raw_config, device_key, str(self._device))
+        config = hydra.utils.instantiate(raw_config)
         validate_experiment(config)
         return config
 

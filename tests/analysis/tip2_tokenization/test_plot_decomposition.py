@@ -1,64 +1,110 @@
 """Tests for versatil.analysis.tip2_tokenization.plot_decomposition module."""
 
-import csv
-from pathlib import Path
+import math
 
+import numpy as np
 import pytest
 
 from versatil.analysis.tip2_tokenization.plot_decomposition import (
-    DEGENERATE_UNIQUE_COUNT,
-    is_degenerate,
-    load_family,
+    arithmetic_mean,
+    band_edges,
+    failing_runs,
+    format_tick,
+    geometric_mean,
+    group_by_param,
 )
 
 
-@pytest.fixture
-def manifest_factory(tmp_path: Path):
-    def factory(rows: list[dict[str, str]]) -> Path:
-        path = tmp_path / "tip2_eval_task_pilot.csv"
-        with open(path, "w", newline="") as manifest:
-            writer = csv.DictWriter(manifest, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
-        return path
-
-    return factory
-
-
-class TestIsDegenerate:
+class TestGeometricMean:
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "unique_count, expected",
-        [
-            (1, True),
-            (DEGENERATE_UNIQUE_COUNT, True),
-            (DEGENERATE_UNIQUE_COUNT + 1, False),
-            (3800, False),
-        ],
-    )
-    def test_collapsed_sequence_count_marks_the_point(
-        self, unique_count: int, expected: bool
-    ):
-        row = {"unique_gt_sequence_count": str(unique_count)}
-        assert is_degenerate(row) is expected
+    def test_matches_log_space_arithmetic_mean(self, rng: np.random.Generator):
+        values = list(rng.uniform(0.1, 10.0, size=5))
 
+        assert geometric_mean(values=values) == pytest.approx(
+            math.exp(np.mean(np.log(values)))
+        )
 
-class TestLoadFamily:
     @pytest.mark.unit
-    def test_filters_one_method_and_sorts_coarse_to_fine(self, manifest_factory):
+    def test_single_value_is_itself(self):
+        assert geometric_mean(values=[3.5]) == pytest.approx(3.5)
+
+    @pytest.mark.unit
+    def test_is_not_dragged_by_one_diverged_seed(self):
+        # An arithmetic mean of (1e-4, 1e-4, 1e2) sits at ~33, hugging the
+        # outlier; the geometric mean stays with the bulk.
+        center = geometric_mean(values=[1e-4, 1e-4, 1e2])
+
+        assert center == pytest.approx(1e-2, rel=1e-6)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("values", [[0.0, 1.0], [-1.0, 2.0], []])
+    def test_non_positive_or_empty_returns_none(self, values: list[float]):
+        assert geometric_mean(values=values) is None
+
+
+class TestArithmeticMean:
+    @pytest.mark.unit
+    def test_plain_mean_including_zero(self):
+        assert arithmetic_mean(values=[0.0, 0.5, 1.0]) == pytest.approx(0.5)
+
+
+class TestGroupByParam:
+    @pytest.mark.unit
+    def test_groups_seeds_and_sorts_coarse_to_fine(self):
         rows = [
-            {"method": "fast", "param": "8.0", "unique_gt_sequence_count": "100"},
-            {"method": "binning", "param": "4.0", "unique_gt_sequence_count": "100"},
-            {"method": "fast", "param": "0.4", "unique_gt_sequence_count": "1"},
+            {"param": "10", "train_seed": "0"},
+            {"param": "1", "train_seed": "0"},
+            {"param": "10", "train_seed": "1"},
+            {"param": "1", "train_seed": "1"},
         ]
 
-        loaded = load_family(csv_path=manifest_factory(rows), method="fast")
+        groups = group_by_param(rows=rows)
 
-        assert [float(row["param"]) for row in loaded] == [0.4, 8.0]
-        assert all(row["method"] == "fast" for row in loaded)
+        assert [param for param, _ in groups] == [1.0, 10.0]
+        assert [row["train_seed"] for row in groups[1][1]] == ["0", "1"]
+
+
+class TestBandEdges:
+    @pytest.mark.unit
+    def test_interior_edges_are_geometric_midpoints(self):
+        params = [1.0, 4.0, 16.0, 64.0]
+
+        left, right = band_edges(params=params, start=1, end=2)
+
+        assert left == pytest.approx(math.sqrt(1.0 * 4.0))
+        assert right == pytest.approx(math.sqrt(16.0 * 64.0))
 
     @pytest.mark.unit
-    def test_missing_method_yields_empty(self, manifest_factory):
-        rows = [{"method": "fast", "param": "1.0", "unique_gt_sequence_count": "5"}]
+    def test_outermost_edges_extend_to_the_panel_margin(self):
+        params = [1.0, 4.0, 16.0]
 
-        assert load_family(csv_path=manifest_factory(rows), method="binning") == []
+        left, right = band_edges(params=params, start=0, end=2)
+
+        assert left == pytest.approx(1.0 / 1.6)
+        assert right == pytest.approx(16.0 * 1.6)
+
+
+class TestFailingRuns:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "failed, expected",
+        [
+            ([True, True, False, True], [(0, 1), (3, 3)]),
+            ([False, False], []),
+            ([True, True, True], [(0, 2)]),
+        ],
+    )
+    def test_returns_runs_of_consecutive_failures(
+        self, failed: list[bool], expected: list[tuple[int, int]]
+    ):
+        assert failing_runs(failed=failed) == expected
+
+
+class TestFormatTick:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "value, expected",
+        [(0.1, "0.1"), (1.0, "1"), (3.0, "3"), (250.0, "250"), (4096.0, "4096")],
+    )
+    def test_compact_grid_labels(self, value: float, expected: str):
+        assert format_tick(value=value) == expected

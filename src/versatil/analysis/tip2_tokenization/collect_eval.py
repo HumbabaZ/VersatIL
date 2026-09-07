@@ -77,6 +77,7 @@ def cell_row(
         "method": cell.method,
         "param": cell.param,
         "train_seed": cell.train_seed,
+        "noise_std": cell.store.noise_std,
         "rollout_success": rollout_success,
         **metrics,
     }
