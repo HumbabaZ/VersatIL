@@ -155,16 +155,21 @@ FAST_OVERRIDES = (f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={FAST_MAX_TOKEN_LEN}",)
 # coefficients, and FAST's post-BPE length grows with them in a data-dependent
 # way, so each trajectory length gets its own measured value. A length missing
 # here fails at command time rather than on the first training batch.
-# The 120 and 240 entries are provisional upper bounds set so the control-rate
-# stage could be submitted unattended: a 120-step chunk has 238 coefficients
-# and a 240-step chunk 478 before BPE, and BPE has been seen to expand a noisy
-# chunk by up to ~1.4x, so each bound clears that with room. Padding is masked
-# out of the loss, so an oversized cap only lengthens the attended sequence.
-# Replace them with the values measure_token_length.py reports for the stage.
+# The 120 and 240 entries are measured, not guessed: job 4126443 ran
+# measure_token_length.py over every chunk of both control-rate stores (2000 of
+# 2000, so the maximum is exact rather than sampled) and found 92 and 172 action
+# tokens. Each cap clears its measured maximum by the tool's margin of 8 plus
+# the EOS. The provisional bounds they replace, 400 and 800, were roughly 4x
+# oversized; padding is masked out of the loss so that cost correctness nothing,
+# but attention is quadratic in the padded length, so the 240-step FAST cell was
+# set to attend about 20x the compute it needs.
+# The 60 entry stays at the value measured across the whole sigma grid: the
+# control-rate stores sit at sigma=1, where FAST emits only 49 tokens, but
+# final_conditional spans sigma up to 4 and FAST's length grows with the noise.
 FAST_MAX_TOKEN_LEN_BY_LENGTH = {
     MULTIPATH_DEFAULT_TRAJECTORY_LENGTH: FAST_MAX_TOKEN_LEN,
-    120: 400,
-    240: 800,
+    120: 101,
+    240: 181,
 }
 # The GPT decoders size a precomputed positional table from this; the default of
 # 512 leaves a binned chunk at 240 steps (478 tokens plus prefix) a margin of a
