@@ -25,6 +25,11 @@ task:
 
 experiment:
   checkpoint_folder: ${checkpoint_dir:synthetic}
+  # /experiment: synthetic switches checkpointing off for every synthetic run
+  # and each concrete config switches it back on. This one did not, so bcat
+  # trained without ever writing weights and its cells were the only ones that
+  # could not be re-evaluated offline when the success metric changed.
+  save_checkpoints: true
 
 policy:
   metadata_passthrough:
