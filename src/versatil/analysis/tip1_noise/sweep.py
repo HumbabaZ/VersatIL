@@ -216,6 +216,31 @@ def fast_max_token_len(trajectory_length: int) -> int:
     return FAST_MAX_TOKEN_LEN_BY_LENGTH[trajectory_length]
 
 
+# Set this when a change makes previously trained cells incomparable with new
+# ones -- a different injection point, decoding rule, normaliser setting, or
+# anything else that alters what a cell means rather than only how it is scored.
+# The tag joins every experiment name, and therefore every checkpoint directory,
+# so the two batches cannot land in the same place.
+#
+# Without it they do, and the failure is silent in a way worth spelling out: the
+# framework does not overwrite on a name collision, it writes the newer files
+# with a "-v1" suffix beside the older ones. A directory then holds two runs,
+# and the *un-suffixed* files are the OLD ones -- so the obvious way to find the
+# final checkpoint, the highest epoch among "latest-<epoch>.ckpt", silently
+# returns stale weights. That happened to the tremor cells, which reuse the
+# names of an earlier position-injection run, and it reversed the reported
+# ordering of the two discrete arms at the highest noise level.
+#
+# Empty is correct for the current grid: everything trained since the two-error-
+# source rework shares one revision, and tagging now would orphan it. Bump this
+# (to "r2", "r3", ...) as part of the change that invalidates the old runs, not
+# afterwards.
+#
+# Note this is deliberately not a per-stage suffix. Stages are meant to share
+# cells -- the control-rate axis reuses the anchor cells the noise sweep already
+# trained, and a stage tag would make those two different experiments.
+SWEEP_REVISION = ""
+
 # A replicate index picks both the demonstration-noise draw and the training
 # seed, so the two vary together and the spread across replicates covers both.
 DATA_SEEDS = (42, 43, 44)
@@ -248,6 +273,35 @@ def noisy_zarr_root() -> str:
             "/data/horse/ws/qizh093f-versatil/noisy_zarr."
         )
     return root
+
+
+CHECKPOINT_DIR_ENV = "VERSATIL_CHECKPOINT_DIR"
+CHECKPOINT_SUBDIR = "synthetic"
+
+
+def checkpoint_dir(cell: "TrainCell") -> Path:
+    """Directory a cell's weights are written to and read back from.
+
+    Single source of truth for that path, so the driver's collision check and
+    any offline re-scoring resolve a cell to the same place. The layout follows
+    the training workspace: the configured checkpoint root, the config's own
+    directory, then the experiment name.
+    """
+    root = os.environ.get(CHECKPOINT_DIR_ENV, ".")
+    config_dir = method_config(task=cell.data.task, method=cell.method).split("/")[-1]
+    return Path(root) / CHECKPOINT_SUBDIR / config_dir / cell.name
+
+
+def existing_checkpoints(cell: "TrainCell") -> list[Path]:
+    """Checkpoints already sitting where this cell would write.
+
+    Non-empty means an earlier run used this name. Training over it does not
+    replace those files -- the newer ones land beside them with a "-v1" suffix,
+    leaving one directory holding two runs whose un-suffixed files are the older
+    of the two. Callers should refuse rather than merge the two runs.
+    """
+    directory = checkpoint_dir(cell)
+    return sorted(directory.glob("*.ckpt")) if directory.is_dir() else []
 
 
 @dataclass(frozen=True)
@@ -372,12 +426,21 @@ class TrainCell:
 
     @property
     def name(self) -> str:
-        """Identifier extending the data cell with method and seed."""
+        """Identifier extending the data cell with method, seed and revision.
+
+        The name is the experiment name, and therefore the checkpoint directory,
+        so two runs that share it share a directory. That is deliberate between
+        stages -- the control-rate axis reuses the anchor cells the noise sweep
+        already trained -- and wrong between revisions, which is what
+        ``SWEEP_REVISION`` separates.
+        """
         experiment_name = f"{self.data.name}__{self.method}__seed-{self.seed}"
         if self.data.noise_model == SyntheticNoiseModel.CABLE_HYSTERESIS.value:
             experiment_name += "__horizon-59__full-windows"
             if self.method == "fast":
                 experiment_name += f"__fast-scale-{CABLE_HYSTERESIS_FAST_SCALE:g}"
+        if SWEEP_REVISION:
+            experiment_name += f"__{SWEEP_REVISION}"
         return experiment_name
 
     @property
@@ -1092,6 +1155,7 @@ def run_train(
     dry_run: bool,
     index: int | None,
     extra_overrides: tuple[str, ...] = (),
+    allow_existing: bool = False,
 ) -> None:
     """Run (or print) the stage's training commands.
 
@@ -1104,9 +1168,13 @@ def run_train(
             deterministic, so an array element and a sequential run at the same
             position resolve to the same cell.
         extra_overrides: Hydra overrides appended to every command.
+        allow_existing: Train even though the cell's checkpoint directory
+            already holds an earlier run. Only for deliberately continuing one.
 
     Raises:
         IndexError: If ``index`` falls outside the stage.
+        FileExistsError: If a cell's checkpoint directory already holds an
+            earlier run and ``allow_existing`` is not set.
     """
     cells = stage_cells(stage)
     check_paths_unique(data_cells(cells))
@@ -1123,6 +1191,21 @@ def run_train(
         if dry_run:
             print("  " + " ".join(command))
             continue
+        # Training into a directory that already holds a run does not replace
+        # it, and the mixture that results reads as one run while returning the
+        # older weights. Refuse here, where the fix is still cheap, rather than
+        # at analysis time where it has already changed a reported number.
+        existing = existing_checkpoints(cell)
+        if existing and not allow_existing:
+            raise FileExistsError(
+                f"{checkpoint_dir(cell)} already holds {len(existing)} "
+                f"checkpoints from an earlier run of '{cell.name}'. Training "
+                "again would write beside them, not over them, leaving one "
+                "directory with two runs. Bump SWEEP_REVISION if the new run "
+                "is not comparable with the old one, clear the directory if "
+                "the old one is disposable, or pass --allow-existing to "
+                "continue the run that is already there."
+            )
         subprocess.run(command, check=True)
 
 
@@ -1157,6 +1240,15 @@ def main() -> None:
         default=None,
         help="Shrink each cell for a smoke test; recorded in the store name.",
     )
+    parser.add_argument(
+        "--allow-existing",
+        action="store_true",
+        help=(
+            "Train even though the cell already has checkpoints. Only for "
+            "continuing that run; a fresh one belongs under a new "
+            "SWEEP_REVISION."
+        ),
+    )
     arguments = parser.parse_args()
 
     if arguments.action == "list":
@@ -1184,6 +1276,7 @@ def main() -> None:
         dry_run=arguments.dry_run,
         index=arguments.index,
         extra_overrides=tuple(arguments.override),
+        allow_existing=arguments.allow_existing,
     )
 
 

@@ -39,14 +39,13 @@ import time
 import numpy as np
 import torch
 
-from versatil.analysis.tip1_noise.sweep import method_config, stage_cells
+from versatil.analysis.tip1_noise.sweep import checkpoint_dir, stage_cells
 from versatil.checkpoint_loading.float_policy import FloatCheckpointLoader
 from versatil.data.synthetic.constants import SyntheticTaskName
 from versatil.data.synthetic.generators import generate_task_episodes
 from versatil.inference.synthetic_rollout import evaluate_rollouts, run_rollouts
 from versatil.metrics.synthetic_metrics import compute_mode_endpoints
 
-CKPT_ROOT = "/data/horse/ws/qizh093f-versatil/checkpoints/synthetic"
 NUM_MODES = 2
 IMAGE_SIZE = 64
 NUM_ROLLOUTS = 10
@@ -57,9 +56,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def ckpt_dir(cell) -> str | None:
-    subdir = method_config(cell.data.task, cell.method).split("/")[-1]
-    path = os.path.join(CKPT_ROOT, subdir, cell.name)
-    return path if os.path.isdir(path) else None
+    """Where this cell's weights live, or None if it was never trained.
+
+    Resolved through sweep.checkpoint_dir rather than rebuilt here: the two
+    deriving the path separately is how a scan came to read one directory while
+    training wrote another.
+    """
+    path = checkpoint_dir(cell)
+    return str(path) if path.is_dir() else None
 
 
 def final_ckpt(cell_path: str) -> str | None:

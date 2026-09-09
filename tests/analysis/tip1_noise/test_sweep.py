@@ -10,12 +10,14 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from versatil.analysis.tip1_noise import sweep as sweep_module
 from versatil.analysis.tip1_noise.sweep import (
     ACTION,
     ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY,
     CABLE_HYSTERESIS,
     CABLE_HYSTERESIS_COMMON_OVERRIDES,
     CABLE_HYSTERESIS_FAST_OVERRIDES,
+    CHECKPOINT_DIR_ENV,
     CONDITIONAL_METHOD_CONFIG,
     CONDITIONAL_TASK,
     FAST_MAX_TOKEN_LEN_BY_LENGTH,
@@ -30,12 +32,15 @@ from versatil.analysis.tip1_noise.sweep import (
     TrainCell,
     add_effective_bins,
     check_paths_unique,
+    checkpoint_dir,
     data_cells,
+    existing_checkpoints,
     fast_max_token_len,
     measured_snr,
     method_config,
     noisy_zarr_root,
     reference_cells,
+    run_train,
     stage_cells,
 )
 
@@ -556,3 +561,89 @@ def test_add_effective_bins_caches_the_reference_per_trajectory_length(
     assert mock_reference.call_count == 2
     assert rows[0]["range_inflation"] == pytest.approx(2.0)
     assert rows[1]["range_inflation"] == pytest.approx(4.0)
+
+
+@pytest.fixture
+def checkpoint_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    root = tmp_path / "checkpoints"
+    monkeypatch.setenv(CHECKPOINT_DIR_ENV, str(root))
+    return root
+
+
+@pytest.mark.unit
+def test_checkpoint_dir_follows_the_training_workspace_layout(
+    checkpoint_root: Path, train_cell_factory: Callable[..., TrainCell]
+):
+    cell = train_cell_factory(method="qfat")
+
+    path = checkpoint_dir(cell)
+
+    assert path.parent.name == "qfat_conditional"
+    assert path.parent.parent.name == "synthetic"
+    assert path.name == cell.name
+
+
+@pytest.mark.unit
+def test_existing_checkpoints_reports_an_earlier_run(
+    checkpoint_root: Path, train_cell_factory: Callable[..., TrainCell]
+):
+    cell = train_cell_factory(method="qfat")
+    assert existing_checkpoints(cell) == []
+
+    directory = checkpoint_dir(cell)
+    directory.mkdir(parents=True)
+    (directory / "latest-1999.ckpt").touch()
+
+    assert [path.name for path in existing_checkpoints(cell)] == ["latest-1999.ckpt"]
+
+
+@pytest.mark.unit
+def test_run_train_refuses_to_write_beside_an_earlier_run(
+    noisy_store_root: Path, checkpoint_root: Path
+):
+    """Training into an occupied directory leaves two runs in one place, and the
+    older one wins any later lookup by epoch. Refuse before that happens.
+    """
+    cell = stage_cells("final_conditional_s0")[0]
+    directory = checkpoint_dir(cell)
+    directory.mkdir(parents=True)
+    (directory / "latest-1999.ckpt").touch()
+
+    with patch("versatil.analysis.tip1_noise.sweep.subprocess.run") as mock_run:
+        with pytest.raises(FileExistsError, match="SWEEP_REVISION"):
+            run_train(
+                stage="final_conditional_s0", matched=True, dry_run=False, index=0
+            )
+        run_train(
+            stage="final_conditional_s0",
+            matched=True,
+            dry_run=False,
+            index=0,
+            allow_existing=True,
+        )
+
+    assert mock_run.call_count == 1
+
+
+@pytest.mark.unit
+def test_sweep_revision_separates_incomparable_batches(
+    monkeypatch: pytest.MonkeyPatch, noisy_store_root: Path
+):
+    untagged = stage_cells("final_conditional_s0")[0].name
+
+    monkeypatch.setattr(sweep_module, "SWEEP_REVISION", "r2")
+    tagged = stage_cells("final_conditional_s0")[0].name
+
+    assert tagged == f"{untagged}__r2"
+
+
+@pytest.mark.unit
+def test_rate_stage_keeps_reusing_anchor_cells_across_stages(noisy_store_root: Path):
+    """Stages deliberately share cells, so the tag must not be per stage."""
+    anchors = {
+        cell.name
+        for cell in stage_cells("final_conditional_s0")
+        if cell.data.sigma_multiplier == 1.0
+    }
+
+    assert {cell.name for cell in stage_cells("rate_conditional_s0")[:4]} == anchors
