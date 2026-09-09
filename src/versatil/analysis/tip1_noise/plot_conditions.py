@@ -271,13 +271,6 @@ def plot_measurement_conditions(out_dir: str) -> str:
                 axes.set_ylabel(f"Context {mode}\n\nNormalised $y$", fontsize=10)
         axes_grid[-1, column].set_xlabel("Normalised $x$", fontsize=10)
 
-    figure.legend(
-        handles=_legend_handles(),
-        loc="lower center",
-        ncol=3,
-        frameon=False,
-        bbox_to_anchor=(0.5, -0.03),
-    )
     figure.suptitle(
         "Same injection point, different error structure "
         f"(hysteresis threshold {HYSTERESIS_THRESHOLD:g}, "
@@ -285,7 +278,15 @@ def plot_measurement_conditions(out_dir: str) -> str:
         fontsize=12,
         y=0.99,
     )
-    figure.tight_layout()
+    # Reserve a band under the axes so the legend clears the x-axis labels.
+    figure.tight_layout(rect=(0, 0.08, 1, 1))
+    figure.legend(
+        handles=_legend_handles(),
+        loc="lower center",
+        ncol=3,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.0),
+    )
     path = os.path.join(out_dir, "b2_measurement_error_structure.png")
     figure.savefig(path, bbox_inches="tight")
     plt.close(figure)
