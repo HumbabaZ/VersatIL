@@ -470,11 +470,12 @@ def test_rate_stage_orders_cells_by_length_then_method(noisy_store_root: Path):
         if cell.data.sigma_multiplier == 1.0
     }
 
-    assert len(cells) == 12
-    assert len(data_cells(cells)) == 3
-    assert [cell.data.trajectory_length for cell in cells] == [60] * 4 + [120] * 4 + [
-        240
-    ] * 4
+    lengths = [60, 120, 240, 400, 1000]
+    assert len(cells) == 4 * len(lengths)
+    assert len(data_cells(cells)) == len(lengths)
+    assert [cell.data.trajectory_length for cell in cells] == [
+        length for length in lengths for _ in range(4)
+    ]
     assert [cell.method for cell in cells[:4]] == list(FINAL_METHODS)
     assert {cell.name for cell in cells[:4]} == anchor_names
 

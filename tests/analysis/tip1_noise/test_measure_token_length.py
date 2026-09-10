@@ -124,7 +124,7 @@ def test_measure_cell_reports_the_largest_action_token_count_across_splits(
 def test_stage_fast_cells_keeps_one_fast_cell_per_store(noisy_store_root: Path):
     cells = stage_fast_cells("rate_conditional_s0")
 
-    assert [cell.data.trajectory_length for cell in cells] == [60, 120, 240]
+    assert [cell.data.trajectory_length for cell in cells] == [60, 120, 240, 400, 1000]
     assert {cell.method for cell in cells} == {"fast"}
 
 

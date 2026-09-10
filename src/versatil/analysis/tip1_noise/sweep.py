@@ -170,12 +170,43 @@ FAST_MAX_TOKEN_LEN_BY_LENGTH = {
     MULTIPATH_DEFAULT_TRAJECTORY_LENGTH: FAST_MAX_TOKEN_LEN,
     120: 101,
     240: 181,
+    # Provisional, pending measurement on the stores once they exist. The three
+    # measured points sit close to 0.7 tokens per step (49, 92, 172 at 60, 120
+    # and 240), so these are that fit with roughly 40% headroom. Measure with
+    # measure_token_length.py and tighten: padding is masked out of the loss, so
+    # an oversized cap costs only compute, but it costs it quadratically.
+    400: 400,
+    1000: 1000,
 }
 # The GPT decoders size a precomputed positional table from this; the default of
 # 512 leaves a binned chunk at 240 steps (478 tokens plus prefix) a margin of a
 # few tokens, so longer chunks raise it. It costs no parameters.
 GPT_MAX_SEQ_LEN_KEY = "policy.decoder.max_seq_len"
+# Every non-default length trained so far used this table size, so it stays the
+# floor: shrinking it for the shorter lengths would give a replicate a smaller
+# positional table than the replicate it is meant to sit beside, which is a
+# different model rather than a different seed.
 GPT_LONG_MAX_SEQ_LEN = 1024
+# Room for the observation prefix and the EOS on top of the action tokens.
+GPT_SEQ_LEN_MARGIN = 64
+
+
+def gpt_max_seq_len(action_tokens: int) -> int:
+    """Positional-table size for a tokenized arm at a non-default length.
+
+    Grows past the historical 1024 only when the chunk needs it, which the
+    control-rate axis reaches once episodes get long: binning emits two tokens
+    per step, so a 1000-step chunk needs about 2000 positions and would
+    silently exceed a fixed 1024. Powers of two keep the count off the critical
+    path of any kernel that prefers them, and the table is precomputed, so a
+    larger one costs no parameters.
+    """
+    needed = action_tokens + GPT_SEQ_LEN_MARGIN
+    size = GPT_LONG_MAX_SEQ_LEN
+    while size < needed:
+        size *= 2
+    return size
+
 
 # A targeted rate-distortion condition for cable hysteresis.  The continuous
 # oracle exactly reproduces the biased kinematics, whereas scale 0.2 retains
@@ -462,10 +493,12 @@ class TrainCell:
             return []
         overrides = [f"task.prediction_horizon={self.prediction_horizon}"]
         if self.method == "binned":
-            binned_tokens = 2 * self.prediction_horizon + 2
-            overrides.append(f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={binned_tokens}")
+            action_tokens = 2 * self.prediction_horizon + 2
+            overrides.append(f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={action_tokens}")
+        elif self.method == "fast":
+            action_tokens = fast_max_token_len(self.data.trajectory_length)
         if self.method in TOKENIZED_METHODS:
-            overrides.append(f"{GPT_MAX_SEQ_LEN_KEY}={GPT_LONG_MAX_SEQ_LEN}")
+            overrides.append(f"{GPT_MAX_SEQ_LEN_KEY}={gpt_max_seq_len(action_tokens)}")
         return overrides
 
     def overrides(
@@ -806,7 +839,7 @@ STAGES = {
         "injections": (ACTION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": (1.0,),
-        "trajectory_lengths": (60, 120, 240),
+        "trajectory_lengths": (60, 120, 240, 400, 1000),
         "methods": FINAL_METHODS,
         "replicates": (0,),
     },
@@ -815,7 +848,7 @@ STAGES = {
         "injections": (ACTION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": (1.0,),
-        "trajectory_lengths": (60, 120, 240),
+        "trajectory_lengths": (60, 120, 240, 400, 1000),
         "methods": FINAL_METHODS,
         "replicates": (0, 1, 2),
     },
