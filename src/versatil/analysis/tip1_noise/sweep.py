@@ -181,6 +181,8 @@ FAST_MAX_TOKEN_LEN_BY_LENGTH = {
 # The GPT decoders size a precomputed positional table from this; the default of
 # 512 leaves a binned chunk at 240 steps (478 tokens plus prefix) a margin of a
 # few tokens, so longer chunks raise it. It costs no parameters.
+# Episodes at or beyond this length stream from disk instead of preloading.
+PRELOAD_LENGTH_LIMIT = 400
 GPT_MAX_SEQ_LEN_KEY = "policy.decoder.max_seq_len"
 # Every non-default length trained so far used this table size, so it stays the
 # floor: shrinking it for the shorter lengths would give a replicate a smaller
@@ -499,6 +501,14 @@ class TrainCell:
             action_tokens = fast_max_token_len(self.data.trajectory_length)
         if self.method in TOKENIZED_METHODS:
             overrides.append(f"{GPT_MAX_SEQ_LEN_KEY}={gpt_max_seq_len(action_tokens)}")
+        if self.data.trajectory_length >= PRELOAD_LENGTH_LIMIT:
+            # The synthetic default preloads the whole store into RAM, which its
+            # own documentation limits to small datasets. A 1000-step store is
+            # 12 GB of frames before the float conversion, and the cluster caps
+            # a single-GPU job below what that needs once copies are counted.
+            # Shorter lengths keep preloading, so the cells already trained stay
+            # reproducible.
+            overrides.append("task.dataloader.preload_data_in_memory=false")
         return overrides
 
     def overrides(
