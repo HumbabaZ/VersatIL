@@ -843,7 +843,9 @@ STAGES = {
         "injections": (ACTION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": (10.0,),
-        "methods": ("fast", "qfat", "bcat"),
+        # Binning was added after the first three arms had trained. It sits
+        # last so those cells keep their array indices: only index 3 is new.
+        "methods": ("fast", "qfat", "bcat", "binned"),
         "replicates": (0,),
         "noise_models": (CABLE_HYSTERESIS,),
     },

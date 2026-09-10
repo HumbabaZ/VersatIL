@@ -184,25 +184,19 @@ def draw_panel(
         [labels[-1, 0]], [labels[-1, 1]], s=46, color=color, marker="X", zorder=6
     )
 
-    # Two numbers, because one cannot tell the conditions apart: how far the
-    # world was corrupted, and how far the supervision left the world. Tremor is
-    # precisely the case where the first is large and the second is zero.
-    world = float(np.linalg.norm(observed - clean, axis=-1).mean())
-    supervision = float(np.linalg.norm(labels - observed, axis=-1).mean())
-    axes.text(
-        0.03,
-        0.97,
-        f"observed vs clean  {world:.3f}\nlabels vs observed  {supervision:.3f}",
-        transform=axes.transAxes,
-        va="top",
-        ha="left",
-        fontsize=8,
-        bbox={"facecolor": "white", "edgecolor": "0.8", "boxstyle": "round,pad=0.3"},
-    )
     axes.set_xlim(*limits)
     axes.set_ylim(*limits)
     axes.set_aspect("equal")
     axes.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
+
+    # Two numbers, because one cannot tell the conditions apart: how far the
+    # world was corrupted, and how far the supervision left the world. Tremor is
+    # precisely the case where the first is large and the second is zero. They
+    # are returned for the caption rather than drawn: at print size an in-panel
+    # annotation is illegible, and the caption is where a reader looks for it.
+    world = float(np.linalg.norm(observed - clean, axis=-1).mean())
+    supervision = float(np.linalg.norm(labels - observed, axis=-1).mean())
+    return world, supervision
 
 
 def _legend_handles() -> list:
@@ -261,23 +255,24 @@ def plot_measurement_conditions(out_dir: str) -> str:
         NUM_MODES, len(columns), figsize=(3.2 * len(columns), 3.2 * NUM_MODES + 0.5)
     )
     axes_grid = np.atleast_2d(axes_grid)
+    print(
+        "caption numbers (mean over steps): observed-vs-clean / labels-vs-observed"
+        f"  [hysteresis threshold {HYSTERESIS_THRESHOLD:g}, "
+        f"Gaussian sigma {GAUSSIAN_STD / TASK_DEFAULT_NOISE_STD:g}x default]"
+    )
     for column, (title, *_rest) in enumerate(columns):
         for mode in range(NUM_MODES):
             axes = axes_grid[mode, column]
-            draw_panel(axes, by_column[column][mode], clean[mode], mode, limits)
+            world, supervision = draw_panel(
+                axes, by_column[column][mode], clean[mode], mode, limits
+            )
+            print(f"  {title:38s} context {mode}: {world:.3f} / {supervision:.3f}")
             if mode == 0:
                 axes.set_title(title, fontsize=11)
             if column == 0:
                 axes.set_ylabel(f"Context {mode}\n\nNormalised $y$", fontsize=10)
         axes_grid[-1, column].set_xlabel("Normalised $x$", fontsize=10)
 
-    figure.suptitle(
-        "Same injection point, different error structure "
-        f"(hysteresis threshold {HYSTERESIS_THRESHOLD:g}, "
-        f"Gaussian $\\sigma$ = {GAUSSIAN_STD / TASK_DEFAULT_NOISE_STD:g}× default)",
-        fontsize=12,
-        y=0.99,
-    )
     # Reserve a band under the axes so the legend clears the x-axis labels.
     figure.tight_layout(rect=(0, 0.08, 1, 1))
     figure.legend(
@@ -302,19 +297,19 @@ def plot_tremor(out_dir: str) -> str:
 
     figure, axes_row = plt.subplots(1, NUM_MODES, figsize=(3.4 * NUM_MODES, 4.4))
     axes_row = np.atleast_1d(axes_row)
+    print(
+        "caption numbers (mean over steps): observed-vs-clean / labels-vs-observed"
+        f"  [tremor, Gaussian sigma {GAUSSIAN_STD / TASK_DEFAULT_NOISE_STD:g}x default]"
+    )
     for mode in range(NUM_MODES):
-        draw_panel(axes_row[mode], episodes[mode], clean[mode], mode, limits)
+        world, supervision = draw_panel(
+            axes_row[mode], episodes[mode], clean[mode], mode, limits
+        )
+        print(f"  context {mode}: {world:.3f} / {supervision:.3f}")
         axes_row[mode].set_title(f"Context {mode}", fontsize=11)
         axes_row[mode].set_xlabel("Normalised $x$", fontsize=10)
     axes_row[0].set_ylabel("Normalised $y$", fontsize=10)
 
-    figure.suptitle(
-        "Tremor: the trajectory itself shakes, so observation and label move "
-        f"together (Gaussian $\\sigma$ = {GAUSSIAN_STD / TASK_DEFAULT_NOISE_STD:g}× "
-        "default)",
-        fontsize=11.5,
-        y=1.0,
-    )
     # Reserve a band under the axes so the two-row legend clears the x labels.
     figure.tight_layout(rect=(0, 0.2, 1, 1))
     figure.legend(

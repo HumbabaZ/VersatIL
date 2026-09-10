@@ -234,16 +234,19 @@ def test_conditional_hysteresis_stage_is_one_strong_shared_condition(
 
 
 @pytest.mark.unit
-def test_fast_win_stage_uses_one_calibrated_store_and_three_arms(
+def test_fast_win_stage_uses_one_calibrated_store_and_four_arms(
     noisy_store_root: Path,
 ):
+    """Binning joined the calibrated point after the other three arms had
+    trained, so it must sit last: the earlier cells keep their array indices.
+    """
     cells = stage_cells("conditional_hysteresis_fast_win_s0")
     stores = data_cells(cells)
 
-    assert len(cells) == 3
+    assert len(cells) == 4
     assert len(stores) == 1
     check_paths_unique(stores)
-    assert [cell.method for cell in cells] == ["fast", "qfat", "bcat"]
+    assert [cell.method for cell in cells] == ["fast", "qfat", "bcat", "binned"]
     assert {cell.data.sigma_multiplier for cell in cells} == {10.0}
     assert {cell.data.noise_model for cell in cells} == {CABLE_HYSTERESIS}
 
