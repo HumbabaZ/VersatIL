@@ -838,6 +838,18 @@ STAGES = {
     # the clean endpoint, while FAST's scale-0.2 reconstruction remains inside the
     # fixed clean-reference success radius. This stage tests that predicted
     # model behavior at one setting; it is not an unbiased robustness sweep.
+    # Three replicates of the same condition. Replicate 0 reuses the cells the
+    # single-seed stage already trained, so a submission that has those starts
+    # at index 4.
+    "conditional_hysteresis": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (ACTION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (4.0,),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+        "noise_models": (CABLE_HYSTERESIS,),
+    },
     "conditional_hysteresis_fast_win_s0": {
         "tasks": (CONDITIONAL_TASK,),
         "injections": (ACTION,),
@@ -847,6 +859,15 @@ STAGES = {
         # last so those cells keep their array indices: only index 3 is new.
         "methods": ("fast", "qfat", "bcat", "binned"),
         "replicates": (0,),
+        "noise_models": (CABLE_HYSTERESIS,),
+    },
+    "conditional_hysteresis_fast_win": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (ACTION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (10.0,),
+        "methods": ("fast", "qfat", "bcat", "binned"),
+        "replicates": (0, 1, 2),
         "noise_models": (CABLE_HYSTERESIS,),
     },
 }

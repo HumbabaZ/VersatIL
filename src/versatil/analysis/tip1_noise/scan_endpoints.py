@@ -105,6 +105,26 @@ def clean_mode_endpoints(trajectory_length: int) -> np.ndarray:
     return compute_mode_endpoints(trajectories, mode_ids, NUM_MODES)
 
 
+def force_greedy_decoding(policy) -> bool:
+    """Make a categorical decoder decode greedily, whatever its config said.
+
+    Cells trained before the decoding rule was pinned carry the old setting in
+    the config saved beside their weights, so re-scoring them would sample where
+    the current cells take the argmax. Decoding is an inference rule and touches
+    no weight, so overriding it here puts both batches on the same footing
+    rather than forcing a retrain. Continuous decoders have no such flag and are
+    left alone.
+
+    Returns:
+        Whether the decoder was switched, so callers can report it.
+    """
+    decoder = getattr(policy, "decoder", None)
+    if getattr(decoder, "deterministic", True):
+        return False
+    decoder.deterministic = True
+    return True
+
+
 def scan_cell(cell, endpoints_cache):
     cell_path = ckpt_dir(cell)
     if cell_path is None:
@@ -127,6 +147,8 @@ def scan_cell(cell, endpoints_cache):
     )
     policy = loader.policy
     policy.eval()
+    if force_greedy_decoding(policy):
+        print(f"    NOTE forced greedy decoding for {cell.method} (config said sample)")
 
     per_mode = []
     with torch.no_grad():
@@ -162,7 +184,10 @@ def scan_cell(cell, endpoints_cache):
         )
         sweep[thr] = float(res["conditional_success_rate"])
 
-    tag = f"{cell.method:6s} T{tl:<3d} sig-{cell.data.sigma_multiplier:g}"
+    tag = (
+        f"{cell.method:6s} T{tl:<3d} sig-{cell.data.sigma_multiplier:g} "
+        f"seed-{cell.seed}"
+    )
     print(
         f"  {tag}  err[min/med/max]="
         f"{errors.min():.4f}/{np.median(errors):.4f}/{errors.max():.4f}  "
@@ -192,6 +217,8 @@ def main() -> None:
                     "trajectory_length": c.data.trajectory_length,
                     "sigma": c.data.sigma_multiplier,
                     "noise_model": c.data.noise_model,
+                    "data_seed": c.data.data_seed,
+                    "train_seed": c.seed,
                     "requested_mode": int(exp),
                     "endpoint_error": float(err),
                 }
@@ -201,6 +228,8 @@ def main() -> None:
             "trajectory_length": c.data.trajectory_length,
             "sigma": c.data.sigma_multiplier,
             "noise_model": c.data.noise_model,
+            "data_seed": c.data.data_seed,
+            "train_seed": c.seed,
         }
         row.update({f"succ@{t}": r["sweep"][t] for t in THRESHOLDS})
         rows_sweep.append(row)
@@ -210,6 +239,8 @@ def main() -> None:
         "trajectory_length",
         "sigma",
         "noise_model",
+        "data_seed",
+        "train_seed",
         "requested_mode",
         "endpoint_error",
     ]
@@ -219,9 +250,14 @@ def main() -> None:
         w = csv.DictWriter(f, fieldnames=err_fields)
         w.writeheader()
         w.writerows(rows_err)
-    sweep_fields = ["method", "trajectory_length", "sigma", "noise_model"] + [
-        f"succ@{t}" for t in THRESHOLDS
-    ]
+    sweep_fields = [
+        "method",
+        "trajectory_length",
+        "sigma",
+        "noise_model",
+        "data_seed",
+        "train_seed",
+    ] + [f"succ@{t}" for t in THRESHOLDS]
     with open(
         os.path.join(out_dir, f"{stage}_threshold_sweep.csv"), "w", newline=""
     ) as f:

@@ -106,16 +106,17 @@ def collect(stage: str, cache_path: str) -> str:
         return np.stack([episode["position"] for episode in episodes])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cells = {cell.method: cell for cell in stage_cells(stage)}
-    arms = [method for method in ARM_ORDER if method in cells]
+    # Keyed by trajectory length as well as method: the control-rate stage holds
+    # the same four arms at three lengths, and keying by method alone would keep
+    # only whichever length came last.
     stored: dict[str, np.ndarray] = {}
-    length = None
-    for method in arms:
-        cell = cells[method]
+    lengths: set[int] = set()
+    methods: set[str] = set()
+    for cell in stage_cells(stage):
         directory = ckpt_dir(cell)
         checkpoint = final_ckpt(directory) if directory else None
         if checkpoint is None:
-            print(f"  MISS {method}: no checkpoint for {cell.name}")
+            print(f"  MISS {cell.method}: no checkpoint for {cell.name}")
             continue
         length = cell.data.trajectory_length
         loader = FloatCheckpointLoader(
@@ -127,7 +128,7 @@ def collect(stage: str, cache_path: str) -> str:
         policy.eval()
         with torch.no_grad():
             for mode in range(NUM_MODES):
-                stored[f"{method}__ctx{mode}"] = run_rollouts(
+                stored[f"{cell.method}__T{length}__ctx{mode}"] = run_rollouts(
                     policy=policy,
                     task_name=TASK,
                     num_rollouts=NUM_ROLLOUTS,
@@ -135,19 +136,23 @@ def collect(stage: str, cache_path: str) -> str:
                     context_mode=mode,
                     temporal_aggregation=False,
                 )
-        print(f"  {method}: rolled out {NUM_MODES} contexts")
+        lengths.add(length)
+        methods.add(cell.method)
+        print(f"  {cell.method} T={length}: rolled out {NUM_MODES} contexts")
 
-    if length is None:
+    if not lengths:
         raise ValueError(f"stage '{stage}' had no trainable checkpoints to roll out")
-    stored["clean"] = clean_paths(length)
-    stored["arms"] = np.array([m for m in arms if f"{m}__ctx0" in stored], dtype=object)
+    for length in lengths:
+        stored[f"clean__T{length}"] = clean_paths(length)
+    stored["arms"] = np.array([m for m in ARM_ORDER if m in methods], dtype=object)
+    stored["lengths"] = np.array(sorted(lengths))
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     np.savez(cache_path, **stored, allow_pickle=True)
     print(f"wrote {cache_path}")
     return cache_path
 
 
-def _draw_panel(axes, rollouts: np.ndarray, clean: np.ndarray, mode: int) -> None:
+def _draw_background(axes) -> None:
     layout = get_task_layout(task_name=TASK, num_modes=NUM_MODES)
     for x_min, y_min, x_max, y_max in layout.obstacles:
         axes.add_patch(
@@ -160,6 +165,10 @@ def _draw_panel(axes, rollouts: np.ndarray, clean: np.ndarray, mode: int) -> Non
                 zorder=1,
             )
         )
+
+
+def _draw_mode(axes, rollouts: np.ndarray, clean: np.ndarray, mode: int) -> None:
+    """One context: its clean target path, its rollouts, and their endpoints."""
     axes.plot(clean[:, 0], clean[:, 1], color=CLEAN_COLOR, linewidth=2.6, zorder=2)
     color = MODE_COLOR[mode]
     for trajectory in rollouts:
@@ -180,45 +189,23 @@ def _draw_panel(axes, rollouts: np.ndarray, clean: np.ndarray, mode: int) -> Non
             zorder=5,
         )
     axes.scatter([clean[0, 0]], [clean[0, 1]], s=34, color=START_COLOR, zorder=6)
+
+
+def _finish(axes, limits: tuple[float, float]) -> None:
+    axes.set_xlim(*limits)
+    axes.set_ylim(*limits)
     axes.set_aspect("equal")
     axes.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
 
 
-def render(cache_path: str, out_dir: str) -> str:
-    """Draw the rollout grid from a cache: contexts as rows, arms as columns."""
-    os.makedirs(out_dir, exist_ok=True)
-    data = np.load(cache_path, allow_pickle=True)
-    arms = [str(method) for method in data["arms"]]
-    clean = data["clean"]
-
-    frame = np.concatenate(
-        [data[key].reshape(-1, 2) for key in data.files if "__ctx" in key]
-        + [clean.reshape(-1, 2)]
-    )
+def _frame_limits(data, keys) -> tuple[float, float]:
+    span = np.concatenate([data[key].reshape(-1, 2) for key in keys])
     margin = 0.04
-    limits = (float(frame.min()) - margin, float(frame.max()) + margin)
+    return (float(span.min()) - margin, float(span.max()) + margin)
 
-    figure, axes_grid = plt.subplots(
-        NUM_MODES,
-        len(arms),
-        figsize=(2.9 * len(arms), 2.9 * NUM_MODES + 0.6),
-        sharex=True,
-        sharey=True,
-    )
-    axes_grid = np.atleast_2d(axes_grid)
-    for column, method in enumerate(arms):
-        for mode in range(NUM_MODES):
-            axes = axes_grid[mode, column]
-            _draw_panel(axes, data[f"{method}__ctx{mode}"], clean[mode], mode)
-            axes.set_xlim(*limits)
-            axes.set_ylim(*limits)
-            if mode == 0:
-                axes.set_title(ARM_LABEL[method], fontsize=10.5)
-            if column == 0:
-                axes.set_ylabel(f"Context {mode}\n\nNormalised $y$", fontsize=10)
-        axes_grid[-1, column].set_xlabel("Normalised $x$", fontsize=10)
 
-    handles = [
+def _legend_handles() -> list:
+    return [
         Line2D([], [], color=CLEAN_COLOR, linewidth=2.6, label="Clean target path"),
         Line2D([], [], color="0.35", linewidth=1.5, label="Rollout (by context)"),
         Line2D(
@@ -227,22 +214,96 @@ def render(cache_path: str, out_dir: str) -> str:
         Line2D([], [], color=START_COLOR, marker="o", linestyle="", label="Start"),
         Patch(facecolor=PLOT_OBSTACLE_COLOR, edgecolor="none", label="Obstacle"),
     ]
-    # No title on the figure: at print size a suptitle is illegible, and what it
-    # would say belongs in the caption.
+
+
+def _save(figure, out_dir: str, stem: str, prefix: str) -> str:
     figure.tight_layout(rect=(0, 0.07, 1, 1))
     figure.legend(
-        handles=handles,
+        handles=_legend_handles(),
         loc="lower center",
-        ncol=len(handles),
+        ncol=5,
         frameon=False,
         bbox_to_anchor=(0.5, 0.0),
     )
-    stem = os.path.splitext(os.path.basename(cache_path))[0]
-    path = os.path.join(out_dir, f"b3_rollouts_{stem}.png")
+    path = os.path.join(out_dir, f"{prefix}_{stem}.png")
     figure.savefig(path, bbox_inches="tight")
     plt.close(figure)
     print(f"wrote {path}")
     return path
+
+
+def render(cache_path: str, out_dir: str) -> str:
+    """Draw a rollout grid, laid out to match what the cache varies.
+
+    A stage at a single trajectory length compares the arms under one
+    condition, so contexts become rows and arms columns. The control-rate stage
+    varies the length instead, and there the question is how each arm moves
+    along that axis, so arms become rows, lengths columns, and both contexts
+    share a panel.
+
+    No title: at print size a suptitle is illegible and belongs in the caption.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    data = np.load(cache_path, allow_pickle=True)
+    arms = [str(method) for method in data["arms"]]
+    lengths = [int(length) for length in data["lengths"]]
+    stem = os.path.splitext(os.path.basename(cache_path))[0]
+    trajectory_keys = [key for key in data.files if "__ctx" in key]
+    limits = _frame_limits(data, trajectory_keys + [f"clean__T{t}" for t in lengths])
+
+    if len(lengths) == 1:
+        length = lengths[0]
+        figure, axes_grid = plt.subplots(
+            NUM_MODES,
+            len(arms),
+            figsize=(2.9 * len(arms), 2.9 * NUM_MODES + 0.6),
+            sharex=True,
+            sharey=True,
+        )
+        axes_grid = np.atleast_2d(axes_grid)
+        clean = data[f"clean__T{length}"]
+        for column, method in enumerate(arms):
+            for mode in range(NUM_MODES):
+                axes = axes_grid[mode, column]
+                _draw_background(axes)
+                _draw_mode(
+                    axes, data[f"{method}__T{length}__ctx{mode}"], clean[mode], mode
+                )
+                _finish(axes, limits)
+                if mode == 0:
+                    axes.set_title(ARM_LABEL[method], fontsize=10.5)
+                if column == 0:
+                    axes.set_ylabel(f"Context {mode}\n\nNormalised $y$", fontsize=10)
+            axes_grid[-1, column].set_xlabel("Normalised $x$", fontsize=10)
+        return _save(figure, out_dir, stem, "b3_rollouts")
+
+    figure, axes_grid = plt.subplots(
+        len(arms),
+        len(lengths),
+        figsize=(2.7 * len(lengths), 2.7 * len(arms) + 0.6),
+        sharex=True,
+        sharey=True,
+    )
+    axes_grid = np.atleast_2d(axes_grid)
+    for row, method in enumerate(arms):
+        for column, length in enumerate(lengths):
+            axes = axes_grid[row, column]
+            _draw_background(axes)
+            clean = data[f"clean__T{length}"]
+            # Both contexts share the panel: the axis being compared is the
+            # length, so the pair of circles belongs together in each cell.
+            for mode in range(NUM_MODES):
+                _draw_mode(
+                    axes, data[f"{method}__T{length}__ctx{mode}"], clean[mode], mode
+                )
+            _finish(axes, limits)
+            if row == 0:
+                axes.set_title(f"$T = {length}$", fontsize=11)
+            if column == 0:
+                axes.set_ylabel(f"{ARM_LABEL[method]}\n\nNormalised $y$", fontsize=9.5)
+    for axes in axes_grid[-1]:
+        axes.set_xlabel("Normalised $x$", fontsize=10)
+    return _save(figure, out_dir, stem, "b4_rate")
 
 
 def main() -> None:
