@@ -67,18 +67,7 @@ def main() -> None:
     axis.set_title("LIBERO-Spatial Rollout Success vs Epoch (10 tasks x 10 trials)")
     axis.grid(**GRID_STYLE)
     axis.set_axisbelow(True)
-    axis.legend(loc="center right", frameon=True, fontsize=9)
-    figure.text(
-        0.5,
-        -0.03,
-        "Matched-backbone arms, single seed. Each arm uses its native/best "
-        "decoding: fast=argmax, binning=sampling t=0.5 (argmax collapses to 1%), "
-        "Q-FAT/BC deterministic. Selection is by rollout, not validation loss "
-        "(which plateaued by epoch 33 for every arm).",
-        ha="center",
-        fontsize=8,
-        color="0.35",
-    )
+    axis.legend(loc="lower right", frameon=True, fontsize=9)
     output_path = output_dir / "figure_libero_rollout_vs_epoch.png"
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)

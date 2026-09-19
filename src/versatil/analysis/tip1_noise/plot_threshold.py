@@ -78,12 +78,32 @@ TAU = 0.043
 # still works, the upper by the cell carrying the hysteresis result.
 WINDOW = (0.032, 0.044)
 
-STAGES = {
-    "tremor_conditional_s0": ("Tremor", (1.0, 2.0, 3.0, 4.0)),
-    "final_conditional_s0": ("Measurement noise", (1.0, 2.0, 3.0, 4.0)),
-    "conditional_hysteresis_s0": ("Hysteresis", (4.0,)),
-    "conditional_hysteresis_fast_win_s0": ("Hysteresis, calibrated", (10.0,)),
-}
+
+def _gaussian_levels(stage: str) -> tuple:
+    """The four Gaussian noise levels of a sigma-swept stage."""
+    return tuple(
+        (stage, sigma, rf"$\times {sigma:g}$") for sigma in (1.0, 2.0, 3.0, 4.0)
+    )
+
+
+# Panels in reading order, hysteresis first: it is the condition the chapter is
+# built on, and the two Gaussian axes are what license reading it. A panel may
+# span more than one stage -- the two hysteresis levels are one condition at two
+# backlash thresholds, not two conditions, so they share an axis and a scale
+# rather than sitting in separate panels that invite a cross-panel comparison.
+# Levels are labelled by what they multiply: a backlash threshold for
+# hysteresis, a noise standard deviation for the Gaussian conditions.
+PANELS = (
+    (
+        "Cable hysteresis",
+        (
+            ("conditional_hysteresis_s0", 4.0, r"$\times 4$"),
+            ("conditional_hysteresis_fast_win_s0", 10.0, r"$\times 10$"),
+        ),
+    ),
+    ("Tremor", _gaussian_levels("tremor_conditional_s0")),
+    ("Measurement noise", _gaussian_levels("final_conditional_s0")),
+)
 
 
 def load_errors(scan_dir: str) -> dict:
@@ -114,14 +134,28 @@ def success_at(values: list[float], threshold: float) -> float:
     return sum(1 for value in values if value < threshold) / len(values)
 
 
-def _panel_cells(errors: dict) -> list[tuple[str, str, float]]:
-    """Panels to draw, in reading order: one condition at one noise level."""
-    cells = []
-    for stage, (title, sigmas) in STAGES.items():
-        for sigma in sigmas:
-            if any(k[0] == stage and k[2] == sigma and k[3] == 60 for k in errors):
-                cells.append((stage, title, sigma))
-    return cells
+def _present(errors: dict, stage: str, sigma: float) -> bool:
+    """Whether any arm was scanned for this level."""
+    return any((stage, arm, sigma, 60) in errors for arm in ARM_ORDER)
+
+
+def _panel_levels(errors: dict) -> list[tuple[str, list[tuple[str, float, str]]]]:
+    """Panels with the levels actually present, dropping anything unscanned."""
+    panels = []
+    for title, levels in PANELS:
+        found = [level for level in levels if _present(errors, level[0], level[1])]
+        if found:
+            panels.append((title, found))
+    return panels
+
+
+def _panel_cells(errors: dict) -> list[tuple[str, str, float, str]]:
+    """Every (panel, level) pair flattened, for the one-level-per-panel figure."""
+    return [
+        (stage, title, sigma, label)
+        for title, levels in _panel_levels(errors)
+        for stage, sigma, label in levels
+    ]
 
 
 def plot_threshold_sensitivity(errors: dict, out_dir: str) -> str:
@@ -137,11 +171,11 @@ def plot_threshold_sensitivity(errors: dict, out_dir: str) -> str:
     axes = np.atleast_1d(axes).ravel()
     sweep = np.linspace(0.015, 0.15, 300)
 
-    for axis, (stage, title, sigma) in zip(axes, panels, strict=False):
+    for axis, (stage, title, _sigma, label) in zip(axes, panels, strict=False):
         axis.axvspan(*WINDOW, color="0.88", zorder=0)
         axis.axvline(TAU, color=REFERENCE, linestyle="--", linewidth=1.1, zorder=1)
         for arm in ARM_ORDER:
-            values = errors.get((stage, arm, sigma, 60))
+            values = errors.get((stage, arm, _sigma, 60))
             if not values:
                 continue
             axis.plot(
@@ -152,7 +186,7 @@ def plot_threshold_sensitivity(errors: dict, out_dir: str) -> str:
                 label=ARM_LABEL[arm],
                 zorder=2,
             )
-        axis.set_title(rf"{title}, $\sigma={sigma:g}$", fontsize=11)
+        axis.set_title(f"{title}, {label}", fontsize=11)
         axis.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
         axis.set_xlim(sweep[0], sweep[-1])
         axis.set_ylim(-0.05, 1.05)
@@ -202,21 +236,21 @@ def plot_threshold_sensitivity(errors: dict, out_dir: str) -> str:
 
 
 def plot_error_spread(errors: dict, out_dir: str) -> str:
-    """C2: per-rollout endpoint errors, showing point masses against spread."""
-    per_stage: list[tuple[str, str, list[float]]] = []
-    for stage, (title, sigmas) in STAGES.items():
-        present = [
-            s for s in sigmas if any((stage, arm, s, 60) in errors for arm in ARM_ORDER)
-        ]
-        if present:
-            per_stage.append((stage, title, present))
-    if not per_stage:
+    """C2: per-rollout endpoint errors, showing point masses against spread.
+
+    One axis per condition, hysteresis first. Its two backlash levels share that
+    axis rather than splitting into separate panels: they are one condition
+    measured twice, and separating them would invite reading the calibrated
+    level as an independent result.
+    """
+    per_panel = _panel_levels(errors)
+    if not per_panel:
         raise ValueError("no cells found in the scan directory")
 
-    widths = [len(sigmas) for _, _, sigmas in per_stage]
+    widths = [len(levels) for _, levels in per_panel]
     fig, axes = plt.subplots(
         1,
-        len(per_stage),
+        len(per_panel),
         figsize=(1.05 * sum(widths) + 2.0, 4.0),
         sharey=True,
         gridspec_kw={"width_ratios": widths},
@@ -224,10 +258,10 @@ def plot_error_spread(errors: dict, out_dir: str) -> str:
     axes = np.atleast_1d(axes)
     rng = np.random.default_rng(0)
 
-    for axis, (stage, title, sigmas) in zip(axes, per_stage, strict=True):
+    for axis, (title, levels) in zip(axes, per_panel, strict=True):
         ticks, tick_labels = [], []
         position = 0
-        for sigma in sigmas:
+        for stage, sigma, label in levels:
             for arm in ARM_ORDER:
                 position += 1
                 values = errors.get((stage, arm, sigma, 60))
@@ -249,11 +283,12 @@ def plot_error_spread(errors: dict, out_dir: str) -> str:
                     statistics.median(values),
                     position - 0.34,
                     position + 0.34,
-                    color=ARM_COLOR[arm],
+                    color="0.15",
                     linewidth=1.8,
+                    zorder=4,
                 )
             ticks.append(position - (len(ARM_ORDER) - 1) / 2)
-            tick_labels.append(rf"$\sigma={sigma:g}$")
+            tick_labels.append(label)
             position += 1
         axis.axhline(TAU, color=REFERENCE, linestyle="--", linewidth=1.1)
         axis.set_xticks(ticks)
@@ -278,12 +313,13 @@ def plot_error_spread(errors: dict, out_dir: str) -> str:
         )
         for a in ARM_ORDER
     ]
+    handles.append(plt.Line2D([], [], color="0.15", linewidth=1.8))
     handles.append(plt.Line2D([], [], color=REFERENCE, linestyle="--", linewidth=1.1))
     fig.legend(
         handles,
-        [ARM_LABEL[a] for a in ARM_ORDER] + [rf"$\tau = {TAU}$"],
+        [ARM_LABEL[a] for a in ARM_ORDER] + ["median", rf"$\tau = {TAU}$"],
         loc="lower center",
-        ncol=5,
+        ncol=6,
         frameon=False,
         bbox_to_anchor=(0.5, -0.08),
     )
@@ -292,6 +328,39 @@ def plot_error_spread(errors: dict, out_dir: str) -> str:
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
     return path
+
+
+def print_caption(errors: dict) -> None:
+    """Caption text for C2, printed rather than drawn.
+
+    Two things a reader needs and the panel cannot carry at print size: that the
+    x10 backlash level is a calibrated point rather than another sample of the
+    condition, and that the flat bands are a property of greedy decoding rather
+    than an unusually consistent policy.
+    """
+    print(
+        "\nC2 caption: Loop-closure error of every rollout, by condition and "
+        "level. Cable hysteresis is shown at two backlash thresholds on one "
+        "axis. The x10 level is a calibrated point: the threshold and the FAST "
+        "rounding scale were chosen analytically before training so that a "
+        "policy reproducing the biased labels exactly would fall outside the "
+        "success radius while FAST's coarse reconstruction stayed inside it. "
+        "It demonstrates a predicted mechanism at one setting and is not an "
+        "unbiased sample of the condition; the x4 level is. Bars are medians, "
+        "the dashed line the tolerance tau = "
+        f"{TAU}. The greedily-decoded arms produce one trajectory per context, "
+        "so their points fall in flat bands and a single replicate carries no "
+        "internal spread; error bars come from between replicates."
+    )
+    for title, levels in _panel_levels(errors):
+        for stage, sigma, label in levels:
+            parts = []
+            for arm in ARM_ORDER:
+                values = errors.get((stage, arm, sigma, 60))
+                if values:
+                    parts.append(f"{arm} {statistics.median(values):.4f}")
+            plain = label.replace("$", "").replace("\\", "")
+            print(f"  {title:18s} {plain:12s} median: {'  '.join(parts)}")
 
 
 def main() -> None:
@@ -305,6 +374,7 @@ def main() -> None:
     print(f"loaded {len(errors)} cells")
     print("wrote", plot_threshold_sensitivity(errors, out_dir))
     print("wrote", plot_error_spread(errors, out_dir))
+    print_caption(errors)
 
 
 if __name__ == "__main__":

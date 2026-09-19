@@ -143,17 +143,6 @@ def plot_decomposition(rows: list[dict[str, str]], output_path: Path) -> None:
     axis.grid(axis="x", **GRID_STYLE)
     axis.set_axisbelow(True)
     axis.legend(loc="lower right", frameon=True, fontsize=9)
-    figure.text(
-        0.5,
-        -0.06,
-        "L: measured sequential decoder steps. Continuous arms have no "
-        "detokenization (recorded ~0.01 ms is the timing boundary itself). "
-        f"{ARM_LABEL[RANDOM_WEIGHT_ARM]}: latency from randomly initialized "
-        "weights (single forward, timing is weight-independent).",
-        ha="center",
-        fontsize=8,
-        color="0.35",
-    )
     figure.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(figure)
 

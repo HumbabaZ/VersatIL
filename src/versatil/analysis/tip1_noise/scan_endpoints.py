@@ -23,7 +23,7 @@ Two hazards this module handles rather than inherits:
   measured here is loop-closure error, not target acquisition. Mode correctness
   is a separate conjunct and comes from ``evaluate_rollouts``.
 
-    python -m versatil.analysis.tip1_noise.scan_endpoints <stage> <out_dir>
+    python -m versatil.analysis.tip1_noise.scan_endpoints <stage> <out_dir> [max_epoch]
 
 Uses the GPU when one is visible. The login node is routinely oversubscribed,
 where a single cell has taken ~20 minutes; prefer scripts/tip1_scan.sbatch.
@@ -50,7 +50,7 @@ NUM_MODES = 2
 IMAGE_SIZE = 64
 NUM_ROLLOUTS = 10
 TASK = SyntheticTaskName.CONDITIONAL_CIRCLE.value
-THRESHOLDS = [0.02, 0.025, 0.03, 0.04, 0.05, 0.07, 0.1, 0.15]
+THRESHOLDS = [0.02, 0.025, 0.03, 0.04, 0.043, 0.05, 0.07, 0.1, 0.15]
 # The login node is heavily oversubscribed; on a GPU node this runs ~20x faster.
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -66,7 +66,7 @@ def ckpt_dir(cell) -> str | None:
     return str(path) if path.is_dir() else None
 
 
-def final_ckpt(cell_path: str) -> str | None:
+def final_ckpt(cell_path: str, max_epoch: int | None = None) -> str | None:
     """Highest-epoch checkpoint of the most recent run in this directory.
 
     A cell retrained under the same name writes beside the earlier run rather
@@ -75,12 +75,21 @@ def final_ckpt(cell_path: str) -> str | None:
     ones. Matching only "latest-<epoch>.ckpt" therefore silently loads stale
     weights. Rank by epoch first and modification time second so the newest
     run wins, and say so when a directory holds more than one run.
+
+    Args:
+        cell_path: Checkpoint directory of one cell.
+        max_epoch: Score the cell at this epoch instead of its last one, by
+            taking the highest checkpoint at or below it. Lets a stage whose
+            cells trained for different epoch budgets be read at one common
+            epoch, since checkpoints land every 100 epochs.
     """
     candidates = []
     for path in glob.glob(f"{cell_path}/latest-*.ckpt"):
         m = re.search(r"latest-(\d+)(?:-v\d+)?\.ckpt$", os.path.basename(path))
         if m:
             candidates.append((int(m.group(1)), os.path.getmtime(path), path))
+    if max_epoch is not None:
+        candidates = [c for c in candidates if c[0] <= max_epoch]
     if not candidates:
         fallback = f"{cell_path}/last.ckpt"
         return fallback if os.path.exists(fallback) else None
@@ -125,12 +134,12 @@ def force_greedy_decoding(policy) -> bool:
     return True
 
 
-def scan_cell(cell, endpoints_cache):
+def scan_cell(cell, endpoints_cache, max_epoch=None):
     cell_path = ckpt_dir(cell)
     if cell_path is None:
         print(f"  MISS dir  {cell.name}")
         return None
-    ckpt = final_ckpt(cell_path)
+    ckpt = final_ckpt(cell_path, max_epoch=max_epoch)
     if ckpt is None:
         print(f"  MISS ckpt {cell.name}")
         return None
@@ -199,14 +208,15 @@ def scan_cell(cell, endpoints_cache):
 def main() -> None:
     stage = sys.argv[1]
     out_dir = sys.argv[2]
+    max_epoch = int(sys.argv[3]) if len(sys.argv) > 3 else None
     os.makedirs(out_dir, exist_ok=True)
     cells = stage_cells(stage)
-    print(f"stage={stage}: {len(cells)} cells  device={DEVICE}")
+    print(f"stage={stage}: {len(cells)} cells  device={DEVICE}  max_epoch={max_epoch}")
 
     endpoints_cache: dict[int, np.ndarray] = {}
     rows_err, rows_sweep = [], []
     for cell in cells:
-        r = scan_cell(cell, endpoints_cache)
+        r = scan_cell(cell, endpoints_cache, max_epoch=max_epoch)
         if r is None:
             continue
         c = r["cell"]

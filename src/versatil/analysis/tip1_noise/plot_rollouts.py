@@ -16,7 +16,7 @@ Split into two entry points, because the rollouts need a GPU and the drawing
 does not:
 
     # once, on a GPU node (see scripts/tip1_scan.sbatch for the environment)
-    python -m versatil.analysis.tip1_noise.plot_rollouts collect <stage> <cache.npz>
+    python -m versatil.analysis.tip1_noise.plot_rollouts collect <stage> <cache.npz> [max_epoch]
     # then, anywhere
     python -m versatil.analysis.tip1_noise.plot_rollouts render <cache.npz> <out_dir>
 """
@@ -77,7 +77,7 @@ CLEAN_COLOR = "0.78"
 START_COLOR = "#2E8B57"
 
 
-def collect(stage: str, cache_path: str) -> str:
+def collect(stage: str, cache_path: str, max_epoch: int | None = None) -> str:
     """Roll out every arm of a stage and cache the trajectories to an npz.
 
     One array per (method, context) plus the clean target paths, so the drawing
@@ -114,7 +114,7 @@ def collect(stage: str, cache_path: str) -> str:
     methods: set[str] = set()
     for cell in stage_cells(stage):
         directory = ckpt_dir(cell)
-        checkpoint = final_ckpt(directory) if directory else None
+        checkpoint = final_ckpt(directory, max_epoch=max_epoch) if directory else None
         if checkpoint is None:
             print(f"  MISS {cell.method}: no checkpoint for {cell.name}")
             continue
@@ -310,7 +310,8 @@ def main() -> None:
     """Dispatch to the collect (GPU) or render (anywhere) path."""
     action = sys.argv[1]
     if action == "collect":
-        collect(sys.argv[2], sys.argv[3])
+        max_epoch = int(sys.argv[4]) if len(sys.argv) > 4 else None
+        collect(sys.argv[2], sys.argv[3], max_epoch=max_epoch)
     elif action == "render":
         cache_path = sys.argv[2]
         out_dir = sys.argv[3] if len(sys.argv) > 3 else "."

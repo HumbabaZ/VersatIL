@@ -59,6 +59,12 @@ MEASUREMENT_OVERRIDES = (
     f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={MEASUREMENT_CAP}",
     "experiment.use_wandb=false",
     "experiment.device=cpu",
+    # Training disables the min-max range clamp for the tokenized arms, and the
+    # measurement must normalise the same way: on the clean rate stores the
+    # per-step delta range sits under the clamp floor, so a clamped normaliser
+    # would attenuate the signal and undercount the surviving coefficients. On
+    # every store with a range above the floor this is an exact no-op.
+    "task.dataloader.clamp_kinematics_range=false",
 )
 
 

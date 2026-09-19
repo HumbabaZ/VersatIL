@@ -534,6 +534,24 @@ class TrainCell:
             if self.method == "act":
                 overrides += list(MATCHED_ACT_EXTRA)
         overrides += self.length_overrides()
+        if self.method in TOKENIZED_METHODS:
+            # Only synthetic_default.yaml turns off min-max range clamping; the
+            # tokenized dataloaders inherit clamp_kinematics_range=True with
+            # min_kinematics_range=0.01 from the structured default. Per-step
+            # deltas shrink as 1/T, so on the rate axis the clamp starts
+            # attenuating exactly the discrete arms under test once a delta
+            # range falls under 0.01 (clean T=400 range is 0.0063). Turning it
+            # off is a no-op for every cell trained so far: the smallest range
+            # in any training store is 0.0105 (sigma-0, T=240).
+            overrides.append("task.dataloader.clamp_kinematics_range=false")
+        if self.data.sigma_multiplier == 0.0:
+            # Clean data converges long before the noisy-protocol 2000 epochs:
+            # the external clean reference trained 400 epochs on 400 episodes,
+            # and 800 epochs on our 1000 episodes is five times that training
+            # volume. Checkpoints land every 100 epochs, so cells already
+            # trained to 2000 are scored at the same epoch offline instead of
+            # being retrained.
+            overrides.append("training.num_epochs=800")
         if self.method == "fast":
             cap = fast_max_token_len(self.data.trajectory_length)
             overrides.append(f"{ACTION_TOKENIZER_MAX_TOKEN_LEN_KEY}={cap}")
@@ -858,6 +876,23 @@ STAGES = {
         "injections": (ACTION,),
         "smoothings": (HIGH_BAND_SMOOTHING,),
         "multipliers": (1.0,),
+        "trajectory_lengths": (60, 120, 240, 400, 1000),
+        "methods": FINAL_METHODS,
+        "replicates": (0, 1, 2),
+    },
+    # The clean control-rate axis: the same T grid with no noise at all. The
+    # noisy grid above holds per-step SNR fixed, so total label corruption
+    # falls as 1/sqrt(T) and a high-T gain cannot be attributed to the control
+    # rate alone. Zero noise removes that confound: what remains is the pure
+    # effect of sampling density on each representation (the supervisor's
+    # frequency_control design, and the thesis mainline for this axis). With
+    # sigma=0 there is no noise draw to redraw, so replicates vary the
+    # training seed; the paired data seeds are kept for naming consistency.
+    "rate_conditional_clean": {
+        "tasks": (CONDITIONAL_TASK,),
+        "injections": (ACTION,),
+        "smoothings": (HIGH_BAND_SMOOTHING,),
+        "multipliers": (0.0,),
         "trajectory_lengths": (60, 120, 240, 400, 1000),
         "methods": FINAL_METHODS,
         "replicates": (0, 1, 2),
